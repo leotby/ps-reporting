@@ -4,6 +4,15 @@
     <meta http-equiv="Content-Security-Policy" content="default-src &#39;none&#39;; script-src &#39;unsafe-inline&#39;; style-src &#39;unsafe-inline&#39;; img-src &#39;self&#39; data: file:; font-src data:; connect-src &#39;none&#39;; form-action &#39;none&#39;; base-uri &#39;none&#39;">
 
     <meta charset="utf-8" />
+    <!-- TEXTES DU PDF — modifiables au Bloc-notes : remplacer le texte entre les balises, enregistrer, recharger -->
+    <!-- 1. Texte de l’encadré « Suivi des risques » -->
+    <script type="text/plain" id="texte-suivi-des-risques">
+[texte V1 à fournir]
+    </script>
+    <!-- 2. Mention générale, en pied de chaque page -->
+    <script type="text/plain" id="texte-mention-generale">
+[texte V1 à fournir]
+    </script>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Reporting Produits Structurés</title>
     <script type="module" crossorigin>//#region src/domain/calendar-date.ts
@@ -81,6 +90,41 @@ function dayOfWeek(date) {
 /** French display format "jj/mm/aaaa". */
 function formatDateFr(date) {
 	return `${date.slice(8, 10)}/${date.slice(5, 7)}/${date.slice(0, 4)}`;
+}
+//#endregion
+//#region src/rules/rounding.ts
+/** Rounds half away from zero. Amounts: 0 decimal. Percentages: 1. Barriers and distances: 2. */
+function roundTo(value, decimals) {
+	const factor = 10 ** decimals;
+	const rounded = Math.round(Math.abs(value) * factor * 1.000000000001) / factor;
+	return value < 0 && rounded !== 0 ? -rounded : rounded;
+}
+/** Two remainders closer than this are equal: the display order decides. */
+var TIE = 1e-9;
+/**
+* Shares of a breakdown, in %, rounded to `decimals` by the largest remainder method: the
+* displayed shares add up to exactly 100. On equal remainders the extra unit goes to the
+* first line in the given order, which is the display order.
+* Null when there is nothing to share out: empty total, or a negative amount.
+*/
+function largestRemainderShares(amounts, decimals = 1) {
+	const total = amounts.reduce((sum, amount) => sum + amount, 0);
+	if (!(total > 0) || amounts.some((amount) => amount < 0)) return null;
+	const scale = 10 ** decimals;
+	const units = 100 * scale;
+	const exact = amounts.map((amount) => amount / total * units);
+	const shares = exact.map((value) => Math.floor(value + TIE));
+	const byRemainder = exact.map((value, index) => ({
+		index,
+		remainder: value - shares[index]
+	})).sort((a, b) => Math.abs(a.remainder - b.remainder) < TIE ? a.index - b.index : b.remainder - a.remainder);
+	let missing = units - shares.reduce((sum, value) => sum + value, 0);
+	for (const { index } of byRemainder) {
+		if (missing <= 0) break;
+		shares[index] = shares[index] + 1;
+		missing -= 1;
+	}
+	return shares.map((value) => value / scale);
 }
 //#endregion
 //#region src/labels/labels.ts
@@ -295,6 +339,87 @@ function outdatedFxRateLabel(currency, enteredOn, asOfDate) {
 /** Banner kept on every page, and on the PDF, in demonstration mode. */
 var DEMO_BANNER = "Données fictives";
 //#endregion
+//#region src/labels/format.ts
+/**
+* Non-breaking space (U+00A0): between the thousands, and between a number and its unit.
+* In Plus Jakarta Sans its glyph is 0.17 em wide, the width of a thin space: the embedded
+* font has no narrow no-break space (U+202F), so none is ever written (docs/design.md §3).
+*/
+var NBSP = "\xA0";
+var NARROW_NBSP = /\u202f/g;
+/** Typographic minus sign (U+2212), as the chapter wants it; Intl writes a hyphen. */
+var MINUS$1 = "−";
+var formatters = /* @__PURE__ */ new Map();
+/** French number: non-breaking space between thousands, decimal comma, typographic minus. */
+function formatNumber(value, minimumDecimals, maximumDecimals) {
+	const key = `${minimumDecimals}:${maximumDecimals}`;
+	let formatter = formatters.get(key);
+	if (formatter === void 0) {
+		formatter = new Intl.NumberFormat("fr-FR", {
+			minimumFractionDigits: minimumDecimals,
+			maximumFractionDigits: maximumDecimals
+		});
+		formatters.set(key, formatter);
+	}
+	return formatter.format(roundTo(value, maximumDecimals)).replace(NARROW_NBSP, NBSP).replace(/^-/, MINUS$1);
+}
+/** A whole number: count of positions, of products, of anomalies. */
+function formatCount(value) {
+	return formatNumber(value, 0, 0);
+}
+/**
+* An amount, rounded to the unit. EUR amounts end with « € », the others with the code of
+* their currency (« 600 000 USD »). Without a currency, the number alone.
+*/
+function formatAmount(value, currency) {
+	const amount = formatNumber(value, 0, 0);
+	if (currency === null) return amount;
+	return `${amount}${NBSP}${currency === "EUR" ? "€" : currency}`;
+}
+/** A percentage with a fixed number of decimals: 0,1 point by default (« 10,7 % », « 91,0 % »). */
+function formatPercent(value, decimals = 1) {
+	return `${formatNumber(value, decimals, decimals)}${NBSP}%`;
+}
+/** A performance, in points of %, always signed (« +8,3 % », « −38,2 % », « 0,0 % »). */
+function formatSignedPercent(value, decimals = 1) {
+	const rounded = roundTo(value, decimals);
+	return `${rounded > 0 ? "+" : rounded < 0 ? MINUS$1 : ""}${formatNumber(Math.abs(rounded), decimals, decimals)}${NBSP}%`;
+}
+/** A quote, such as the initial level of an underlying: 2 to 4 decimals (« 5 421,60 », « 1,0842 »). */
+function formatQuote(value) {
+	return formatNumber(value, 2, 4);
+}
+/** A barrier or a level, in % of the initial level: up to 2 decimals (« 100 % », « 92,48 % »). */
+function formatLevel(value) {
+	return `${formatNumber(value, 0, 2)}${NBSP}%`;
+}
+/**
+* A distance to a barrier, always signed and written with « % » (the abbreviation of
+* « points » is written nowhere, docs/design.md §3): one decimal at least, two at most (« +32,0 % », « −8,0 % », « +12,48 % »).
+*/
+function formatDistance(value) {
+	const rounded = roundTo(value, 2);
+	return `${rounded > 0 ? "+" : rounded < 0 ? MINUS$1 : ""}${formatNumber(Math.abs(rounded), 1, 2)}${NBSP}%`;
+}
+/** « 1 EUR = »: start of every exchange rate shown, and label of the field where one is typed. */
+var FX_RATE_PREFIX = `1${NBSP}EUR =`;
+/**
+* An exchange rate, in the market convention EUR → currency (docs/regles-metier.md §0):
+* « 1 EUR = 1,2500 USD ». Four decimals, as rates are quoted; up to six when the rate has them.
+*/
+function formatFxRate(currency, unitsPerEur) {
+	return `${FX_RATE_PREFIX} ${formatNumber(unitsPerEur, 4, 6)}${NBSP}${currency}`;
+}
+/** A duration in years, one decimal (« 3,2 ans »). */
+function formatYears(value) {
+	const rounded = roundTo(value, 1);
+	return `${formatNumber(rounded, 1, 1)}${NBSP}${rounded >= 2 ? "ans" : "an"}`;
+}
+/** jj/mm/aaaa. */
+function formatDate(date) {
+	return formatDateFr(date);
+}
+//#endregion
 //#region src/domain/status.ts
 var POSITION_STATUSES = [
 	"INCLUSE",
@@ -440,8 +565,10 @@ var state = {
 	carres: null
 };
 var started = false;
+var sizes = /* @__PURE__ */ new Map();
 var listeners$1 = /* @__PURE__ */ new Set();
-var logoState = () => state;
+/** Size of the image in its own pixels; null while it is not there. The PDF scales its footer logo from it. */
+var logoSize = (name) => state[name] === true ? sizes.get(name) ?? null : null;
 /** True once every image has answered and at least one is missing. */
 var logosMissing = (current = state) => NAMES.every((name) => current[name] !== null) && NAMES.some((name) => current[name] === false);
 function subscribeLogos(listener) {
@@ -463,7 +590,13 @@ function startLogos() {
 			};
 			for (const listener of [...listeners$1]) listener();
 		};
-		probe.addEventListener("load", () => settle(probe.naturalWidth > 0));
+		probe.addEventListener("load", () => {
+			sizes.set(name, {
+				width: probe.naturalWidth,
+				height: probe.naturalHeight
+			});
+			settle(probe.naturalWidth > 0 && probe.naturalHeight > 0);
+		});
 		probe.addEventListener("error", () => settle(false));
 		probe.src = LOGO_FILES[name];
 	}
@@ -487,6 +620,27 @@ function whenLoaded(image) {
 		image.addEventListener("error", () => resolve(), { once: true });
 	});
 }
+/** Identifiers of the two blocks of the HTML file. */
+var PDF_TEXT_BLOCKS = {
+	risk: "texte-suivi-des-risques",
+	general: "texte-mention-generale"
+};
+/** Internal line of the home page while a block is empty or still holds the marker. */
+var PDF_TEXTS_MISSING_LABEL = "Textes du PDF à compléter";
+/** What a block holds: null when it is absent, empty, or still at the marker. */
+function blockText(raw) {
+	const text = (raw ?? "").replace(/\r\n?/g, "\n").trim();
+	return text === "" || text === "[texte V1 à fournir]" ? null : text;
+}
+/** The two texts as the file holds them now. */
+function readPdfTexts() {
+	const read = (id) => blockText(document.getElementById(id)?.textContent);
+	return {
+		risk: read(PDF_TEXT_BLOCKS.risk),
+		general: read(PDF_TEXT_BLOCKS.general)
+	};
+}
+var pdfTextsMissing = (texts) => texts.risk === null || texts.general === null;
 //#endregion
 //#region src/domain/anomaly.ts
 var ANOMALY_CATALOG = {
@@ -749,18 +903,26 @@ var PROTECTION_KINDS = [
 function amountOf(percent, nominal) {
 	return percent * nominal / 100;
 }
-/** Value of one unit of the currency in EUR: 1 for the euro, null without a rate. */
-function rateToEur(currency, fxRates) {
+/** Units of the currency for 1 EUR: 1 for the euro, null without a rate. */
+function unitsPerEur(currency, fxRates) {
 	if (currency === null) return null;
 	if (currency === "EUR") return 1;
 	const rate = fxRates.find((candidate) => candidate.currency.toUpperCase() === currency);
-	return rate === void 0 ? null : rate.rateToEur;
+	return rate === void 0 ? null : rate.unitsPerEur;
+}
+/**
+* The only conversion of the tool: an amount in a currency, in EUR. `rate` is the number of
+* units of that currency for 1 EUR, so the amount is divided: 100 000 USD at 1 EUR = 1,25 USD
+* is 80 000 EUR.
+*/
+function toEur(amount, rate) {
+	return amount / rate;
 }
 /** Nominal in EUR, or null when the nominal is absent or the currency has no rate. */
 function nominalInEur(position, fxRates) {
 	if (position.nominal === null) return null;
-	const rate = rateToEur(position.currency, fxRates);
-	return rate === null ? null : position.nominal * rate;
+	const rate = unitsPerEur(position.currency, fxRates);
+	return rate === null ? null : toEur(position.nominal, rate);
 }
 function indexProducts(products) {
 	return new Map(products.map((product) => [product.isin, product]));
@@ -776,13 +938,13 @@ function buildHoldings(positions, products, fxRates) {
 		if (position.status !== "INCLUSE") continue;
 		const product = position.isin === null ? void 0 : products.get(position.isin);
 		if (product === void 0 || position.nominal === null) throw new Error(`Position incluse sans produit ou sans nominal : ${position.id}`);
-		const rate = rateToEur(product.currency, fxRates);
+		const rate = unitsPerEur(product.currency, fxRates);
 		holdings.push({
 			position,
 			product,
 			nominal: position.nominal,
-			rateToEur: rate,
-			nominalEur: rate === null ? null : position.nominal * rate
+			unitsPerEur: rate,
+			nominalEur: rate === null ? null : toEur(position.nominal, rate)
 		});
 	}
 	return holdings;
@@ -1319,7 +1481,7 @@ function reconcile(input) {
 				const rows = isinLines.map((line) => line.source.row).join(", ");
 				report("LIGNES_MULTIPLES", first, null, null, `${isinLines.length} lignes pour le même compte et le même ISIN (lignes ${rows}) : elles sont agrégées.`);
 			}
-			if (status === "INCLUSE" && currency !== "EUR" && (currency === null || !currenciesWithRate.has(currency))) report("TAUX_MANQUANT", first, null, currency, currency === null ? "Devise du produit inconnue : la position sort des montants en euros." : `Aucun taux de change ${currency} → EUR : la position sort des montants en euros.`);
+			if (status === "INCLUSE" && currency !== "EUR" && (currency === null || !currenciesWithRate.has(currency))) report("TAUX_MANQUANT", first, null, currency, currency === null ? "Devise du produit inconnue : la position sort des montants en euros." : `Aucun taux de change pour ${currency} : la position sort des montants en euros.`);
 			accountPositions.push({
 				id: `${group.id}|${isin}`,
 				accountId: group.id,
@@ -32854,12 +33016,14 @@ function loadFiles(state, files, options = {}) {
 	};
 	return withSources(state, read.sources, state.demoMode ? [] : state.fxRates, false);
 }
+/** A rate that is empty, unreadable, zero or negative is never taken (docs/regles-metier.md §0). */
+var fxRateRefusal = (currency) => `Taux ${FX_RATE_PREFIX} x${currency === "" ? "" : ` ${currency}`} : un nombre strictement positif est attendu.`;
 /** Why a rate cannot be entered; null when it is valid. */
 function fxRateError(rate) {
 	const currency = rate.currency.trim().toUpperCase();
 	if (!/^[A-Z]{3}$/.test(currency)) return `Devise « ${rate.currency} » : un code de trois lettres est attendu.`;
 	if (currency === "EUR") return "L'euro n'a pas besoin de taux.";
-	if (!Number.isFinite(rate.rateToEur) || rate.rateToEur <= 0) return `Taux ${currency} → EUR : un nombre strictement positif est attendu.`;
+	if (!Number.isFinite(rate.unitsPerEur) || rate.unitsPerEur <= 0) return fxRateRefusal(currency);
 	return null;
 }
 function withRates(state, fxRates) {
@@ -33021,7 +33185,7 @@ var ICON_PATHS = {
 	check: "M5 12.5l4.5 4.5L19 7.5",
 	sortUp: "M6 15l6-6 6 6",
 	sortDown: "M6 9l6 6 6-6",
-	globe: "M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z"
+	layers: "M12 3l9 4.500-9 4.500-9-4.500L12 3zM3 12l9 4.500 9-4.500M3 16.500l9 4.500 9-4.500"
 };
 /** Icons of the six indicative outcomes (docs/design.md §6.10). */
 var OUTCOME_ICON_PATHS = {
@@ -33103,167 +33267,6 @@ function internal(state, build) {
 /** A dashed block that carries the marker: excluded positions, internal notes. */
 function internalBlock(state, ...children) {
 	return internal(state, () => h("div", { class: "internal-block" }, internalMarker(), ...children));
-}
-//#endregion
-//#region src/rules/rounding.ts
-/** Rounds half away from zero. Amounts: 0 decimal. Percentages: 1. Barriers and distances: 2. */
-function roundTo(value, decimals) {
-	const factor = 10 ** decimals;
-	const rounded = Math.round(Math.abs(value) * factor * 1.000000000001) / factor;
-	return value < 0 && rounded !== 0 ? -rounded : rounded;
-}
-/** Two remainders closer than this are equal: the display order decides. */
-var TIE = 1e-9;
-/**
-* Shares of a breakdown, in %, rounded to `decimals` by the largest remainder method: the
-* displayed shares add up to exactly 100. On equal remainders the extra unit goes to the
-* first line in the given order, which is the display order.
-* Null when there is nothing to share out: empty total, or a negative amount.
-*/
-function largestRemainderShares(amounts, decimals = 1) {
-	const total = amounts.reduce((sum, amount) => sum + amount, 0);
-	if (!(total > 0) || amounts.some((amount) => amount < 0)) return null;
-	const scale = 10 ** decimals;
-	const units = 100 * scale;
-	const exact = amounts.map((amount) => amount / total * units);
-	const shares = exact.map((value) => Math.floor(value + TIE));
-	const byRemainder = exact.map((value, index) => ({
-		index,
-		remainder: value - shares[index]
-	})).sort((a, b) => Math.abs(a.remainder - b.remainder) < TIE ? a.index - b.index : b.remainder - a.remainder);
-	let missing = units - shares.reduce((sum, value) => sum + value, 0);
-	for (const { index } of byRemainder) {
-		if (missing <= 0) break;
-		shares[index] = shares[index] + 1;
-		missing -= 1;
-	}
-	return shares.map((value) => value / scale);
-}
-//#endregion
-//#region src/labels/format.ts
-/**
-* Non-breaking space (U+00A0): between the thousands, and between a number and its unit.
-* In Plus Jakarta Sans its glyph is 0.17 em wide, the width of a thin space: the embedded
-* font has no narrow no-break space (U+202F), so none is ever written (docs/design.md §3).
-*/
-var NBSP = "\xA0";
-var NARROW_NBSP = /\u202f/g;
-/** Typographic minus sign (U+2212), as the chapter wants it; Intl writes a hyphen. */
-var MINUS$1 = "−";
-var formatters = /* @__PURE__ */ new Map();
-/** French number: non-breaking space between thousands, decimal comma, typographic minus. */
-function formatNumber(value, minimumDecimals, maximumDecimals) {
-	const key = `${minimumDecimals}:${maximumDecimals}`;
-	let formatter = formatters.get(key);
-	if (formatter === void 0) {
-		formatter = new Intl.NumberFormat("fr-FR", {
-			minimumFractionDigits: minimumDecimals,
-			maximumFractionDigits: maximumDecimals
-		});
-		formatters.set(key, formatter);
-	}
-	return formatter.format(roundTo(value, maximumDecimals)).replace(NARROW_NBSP, NBSP).replace(/^-/, MINUS$1);
-}
-/** A whole number: count of positions, of products, of anomalies. */
-function formatCount(value) {
-	return formatNumber(value, 0, 0);
-}
-/**
-* An amount, rounded to the unit. EUR amounts end with « € », the others with the code of
-* their currency (« 600 000 USD »). Without a currency, the number alone.
-*/
-function formatAmount(value, currency) {
-	const amount = formatNumber(value, 0, 0);
-	if (currency === null) return amount;
-	return `${amount}${NBSP}${currency === "EUR" ? "€" : currency}`;
-}
-/** A percentage with a fixed number of decimals: 0,1 point by default (« 10,7 % », « 91,0 % »). */
-function formatPercent(value, decimals = 1) {
-	return `${formatNumber(value, decimals, decimals)}${NBSP}%`;
-}
-/** A performance, in points of %, always signed (« +8,3 % », « −38,2 % », « 0,0 % »). */
-function formatSignedPercent(value, decimals = 1) {
-	const rounded = roundTo(value, decimals);
-	return `${rounded > 0 ? "+" : rounded < 0 ? MINUS$1 : ""}${formatNumber(Math.abs(rounded), decimals, decimals)}${NBSP}%`;
-}
-/** A quote, such as the initial level of an underlying: 2 to 4 decimals (« 5 421,60 », « 1,0842 »). */
-function formatQuote(value) {
-	return formatNumber(value, 2, 4);
-}
-/** A barrier or a level, in % of the initial level: up to 2 decimals (« 100 % », « 92,48 % »). */
-function formatLevel(value) {
-	return `${formatNumber(value, 0, 2)}${NBSP}%`;
-}
-/** A distance to a barrier or a performance, in points, always signed (« +12,48 », « −22,64 »). */
-function formatPoints(value) {
-	const rounded = roundTo(value, 2);
-	return `${rounded > 0 ? "+" : rounded < 0 ? MINUS$1 : ""}${formatNumber(Math.abs(rounded), 0, 2)}`;
-}
-/** A duration in years, one decimal (« 3,2 ans »). */
-function formatYears(value) {
-	const rounded = roundTo(value, 1);
-	return `${formatNumber(rounded, 1, 1)}${NBSP}${rounded >= 2 ? "ans" : "an"}`;
-}
-/** jj/mm/aaaa. */
-function formatDate(date) {
-	return formatDateFr(date);
-}
-//#endregion
-//#region src/app/router.ts
-var ROUTES = [
-	{
-		id: "accueil",
-		label: "Accueil",
-		internal: false,
-		parent: null
-	},
-	{
-		id: "dashboard",
-		label: "Dashboard",
-		internal: false,
-		parent: null
-	},
-	{
-		id: "analyse",
-		label: "Analyse PS",
-		internal: false,
-		parent: null
-	},
-	{
-		id: "simulateur",
-		label: "Simulateur",
-		internal: false,
-		parent: "analyse"
-	},
-	{
-		id: "porteurs",
-		label: "Liste des porteurs",
-		internal: true,
-		parent: null
-	}
-];
-var DEFAULT_ROUTE = "accueil";
-var hashOf = (route) => `#/${route}`;
-/** The page an address asks for; the home page when the fragment is empty or unknown. */
-function routeOf(hash) {
-	const id = hash.replace(/^#\/?/, "").split(/[/?]/)[0] ?? "";
-	return ROUTES.find((route) => route.id === id)?.id ?? "accueil";
-}
-/** Why a page cannot be opened now; null when it can. */
-function unavailableReason(route, context) {
-	if (!context.built.has(route)) return "Page à venir";
-	if (route !== "accueil" && !context.hasData) return "Chargez d’abord les deux bases";
-	return null;
-}
-/** Routes shown in the navigation: the internal ones disappear in presentation mode. */
-function visibleRoutes(context) {
-	return ROUTES.filter((route) => !(route.internal && context.presentationMode));
-}
-/** The page really shown for an address: the home page when the one asked for cannot be opened. */
-function resolveRoute(hash, context) {
-	const asked = routeOf(hash);
-	if (ROUTES.find((candidate) => candidate.id === asked).internal && context.presentationMode) return DEFAULT_ROUTE;
-	return unavailableReason(asked, context) === null ? asked : DEFAULT_ROUTE;
 }
 //#endregion
 //#region src/app/pages/accueil-model.ts
@@ -33368,7 +33371,7 @@ function fxRowModels(state) {
 		const rate = state.fxRates.find((entered) => entered.currency === currency);
 		return {
 			currency,
-			rate: rate === void 0 ? "" : String(rate.rateToEur).replace(".", ","),
+			rate: rate === void 0 ? "" : String(rate.unitsPerEur).replace(".", ","),
 			date: rate?.date ?? "",
 			source: rate?.source ?? "",
 			enteredOn: rate === void 0 ? null : `Saisi le ${formatDate(rate.enteredOn)}`,
@@ -33378,30 +33381,12 @@ function fxRowModels(state) {
 		};
 	});
 }
-/** A rate as it is typed: « 0,92 » or « 0.92 ». Null when it is not a number strictly positive. */
+/** A rate as it is typed: « 1,25 » or « 1.25 ». Null when it is empty, unreadable, zero or negative. */
 function parseRateInput(text) {
 	const compact = text.replace(/[\s  ]/g, "").replace(",", ".");
 	if (!/^\d+(\.\d+)?$/.test(compact)) return null;
 	const value = Number(compact);
 	return Number.isFinite(value) && value > 0 ? value : null;
-}
-var TOOLS = [
-	"dashboard",
-	"analyse",
-	"porteurs"
-];
-/** Cards towards the Dashboard, the Analyse PS and the list of holders (docs/produit.md §2 point 6). */
-function toolCards(context) {
-	return ROUTES.filter((route) => TOOLS.includes(route.id) && !(route.internal && context.presentationMode)).map((route) => {
-		const reason = unavailableReason(route.id, context);
-		return {
-			route: route.id,
-			label: route.label,
-			href: reason === null ? hashOf(route.id) : null,
-			reason,
-			internal: route.internal
-		};
-	});
 }
 //#endregion
 //#region src/app/pages/accueil.ts
@@ -33413,7 +33398,7 @@ var kept = null;
 var ACCEPT = ".xlsx,.xlsm,.xlsb,.xls";
 /** Lets a message paint before a long synchronous task. */
 var painted = () => new Promise((resolve) => setTimeout(resolve, 0));
-function mountAccueil(host, store, built) {
+function mountAccueil(host, store) {
 	/** A single file received, waiting for the other. */
 	let pending = null;
 	/** Files of the last reading: read again once the as-of date is entered. */
@@ -33593,14 +33578,14 @@ function mountAccueil(host, store, built) {
 	};
 	const save = (currency, draft) => {
 		const code = currency.trim().toUpperCase();
-		const rateToEur = parseRateInput(draft.rate);
+		const unitsPerEur = parseRateInput(draft.rate);
 		const rate = {
 			currency: code,
-			rateToEur: rateToEur ?? NaN,
+			unitsPerEur: unitsPerEur ?? NaN,
 			date: parseIsoDate(draft.date),
 			source: draft.source.trim() === "" ? null : draft.source.trim()
 		};
-		const error = rateToEur === null ? `Taux ${code === "" ? "" : `${code} `}→ EUR : un nombre strictement positif est attendu (par exemple 0,92).` : fxRateError(rate);
+		const error = unitsPerEur === null ? fxRateRefusal(code) : fxRateError(rate);
 		if (error !== null) {
 			rateErrors.set(currency, error);
 			render();
@@ -33627,6 +33612,8 @@ function mountAccueil(host, store, built) {
 		input.addEventListener("input", () => onInput(input.value));
 		return input;
 	};
+	/** « 1 EUR = [ ] USD »: the sense of the rate is read on the row itself (docs/produit.md §2). */
+	const rateField = (currency, input) => h("div", { class: "fx-rate" }, h("span", { class: "fx-rate-unit" }, FX_RATE_PREFIX), input, currency === null ? null : h("span", { class: "fx-rate-unit" }, currency));
 	const rateRow = (row, demo) => {
 		const draft = draftOf(row);
 		const edit = (change) => {
@@ -33642,7 +33629,7 @@ function mountAccueil(host, store, built) {
 			row.warning,
 			error ?? null
 		].filter((note) => note !== null);
-		return h("tr", null, h("td", { class: "tone-strong" }, h("div", { class: "cell-line" }, `${row.currency} → EUR`), ...notes.map((note) => h("div", { class: note === error ? "cell-sub cell-alert" : "cell-sub" }, note))), h("td", null, field(`rate-${row.currency}`, "text", draft.rate, `Taux ${row.currency} vers l’euro`, (rate) => edit({ rate }), "0,00")), h("td", null, field(`date-${row.currency}`, "date", draft.date, `Date du taux ${row.currency}`, (date) => edit({ date }))), h("td", null, field(`source-${row.currency}`, "text", draft.source, `Source du taux ${row.currency}`, (source) => edit({ source }), demo ? "" : "BCE")), h("td", { class: "tone-soft" }, h("div", { class: "cell-line" }, row.enteredOn ?? "—")), h("td", null, h("div", { class: "row-actions" }, button({
+		return h("tr", null, h("td", { class: "tone-strong" }, h("div", { class: "cell-line" }, row.currency), ...notes.map((note) => h("div", { class: note === error ? "cell-sub cell-alert" : "cell-sub" }, note))), h("td", null, rateField(row.currency, field(`rate-${row.currency}`, "text", draft.rate, `Taux : nombre de ${row.currency} pour 1 EUR`, (rate) => edit({ rate })))), h("td", null, field(`date-${row.currency}`, "date", draft.date, `Date du taux ${row.currency}`, (date) => edit({ date }))), h("td", null, field(`source-${row.currency}`, "text", draft.source, `Source du taux ${row.currency}`, (source) => edit({ source }), demo ? "" : "BCE")), h("td", { class: "tone-soft" }, h("div", { class: "cell-line" }, row.enteredOn ?? "—")), h("td", null, h("div", { class: "row-actions" }, button({
 			label: "Enregistrer",
 			variant: "toolbar-accent",
 			focusKey: `save-${row.currency}`,
@@ -33675,7 +33662,7 @@ function mountAccueil(host, store, built) {
 			});
 		};
 		const error = rateErrors.get("");
-		return h("tr", null, h("td", null, field("rate-new-currency", "text", newCurrency, "Devise à ajouter (code de trois lettres)", (value) => newCurrency = value, "Autre devise"), error === void 0 ? null : h("div", { class: "cell-sub cell-alert" }, error)), h("td", null, field("rate-new", "text", draft.rate, "Taux de la devise à ajouter vers l’euro", (rate) => edit({ rate }), "0,00")), h("td", null, field("date-new", "date", draft.date, "Date du taux à ajouter", (date) => edit({ date }))), h("td", null, field("source-new", "text", draft.source, "Source du taux à ajouter", (source) => edit({ source }))), h("td", { class: "tone-soft" }, h("div", { class: "cell-line" }, "—")), h("td", null, h("div", { class: "row-actions" }, button({
+		return h("tr", null, h("td", null, field("rate-new-currency", "text", newCurrency, "Devise à ajouter (code de trois lettres)", (value) => newCurrency = value, "Autre devise"), error === void 0 ? null : h("div", { class: "cell-sub cell-alert" }, error)), h("td", null, rateField(null, field("rate-new", "text", draft.rate, "Taux de la devise à ajouter : nombre d’unités pour 1 EUR", (rate) => edit({ rate })))), h("td", null, field("date-new", "date", draft.date, "Date du taux à ajouter", (date) => edit({ date }))), h("td", null, field("source-new", "text", draft.source, "Source du taux à ajouter", (source) => edit({ source }))), h("td", { class: "tone-soft" }, h("div", { class: "cell-line" }, "—")), h("td", null, h("div", { class: "row-actions" }, button({
 			label: "Ajouter",
 			variant: "toolbar",
 			focusKey: "save-new",
@@ -33691,7 +33678,7 @@ function mountAccueil(host, store, built) {
 		const code = newCurrency.trim().toUpperCase();
 		const refused = fxRateError({
 			currency: code,
-			rateToEur: 1,
+			unitsPerEur: 1,
 			date: null,
 			source: null
 		});
@@ -33700,9 +33687,9 @@ function mountAccueil(host, store, built) {
 			render();
 			return;
 		}
-		const rateToEur = parseRateInput(draft.rate);
-		if (rateToEur === null) {
-			rateErrors.set("", `Taux ${code} → EUR : un nombre strictement positif est attendu (par exemple 0,92).`);
+		const unitsPerEur = parseRateInput(draft.rate);
+		if (unitsPerEur === null) {
+			rateErrors.set("", fxRateRefusal(code));
 			render();
 			return;
 		}
@@ -33711,7 +33698,7 @@ function mountAccueil(host, store, built) {
 		newCurrency = "";
 		store.dispatch((session) => setFxRate(session, {
 			currency: code,
-			rateToEur,
+			unitsPerEur,
 			date: parseIsoDate(draft.date),
 			source: draft.source.trim() === "" ? null : draft.source.trim()
 		}, today()));
@@ -33723,40 +33710,20 @@ function mountAccueil(host, store, built) {
 		return h("section", {
 			class: "inventory tile",
 			attrs: { "aria-label": "Taux de change" }
-		}, h("div", { class: "inventory-head" }, h("h2", { class: "section-title" }, "Taux de change"), h("span", { class: "section-note" }, rows.length === 0 ? "Toutes les positions analysées sont en euros : aucun taux à saisir." : "Un taux vers l’euro par devise des positions analysées. Aucune valeur n’est proposée : un taux ne s’invente pas.")), h("div", { class: "inventory-frame scroll" }, h("table", { class: "data-table fx-table" }, h("thead", { class: "on-brand" }, h("tr", null, ...[
+		}, h("div", { class: "inventory-head" }, h("h2", { class: "section-title" }, "Taux de change"), h("span", { class: "section-note" }, rows.length === 0 ? "Toutes les positions analysées sont en euros : aucun taux à saisir." : "Un taux par devise des positions analysées, dans le sens du marché : 1 EUR = x devise. Aucune valeur n’est proposée : un taux ne s’invente pas.")), h("div", { class: "inventory-frame scroll" }, h("table", { class: "data-table fx-table" }, h("thead", { class: "on-brand" }, h("tr", null, ...[
 			"Devise",
-			"Taux vers l’euro",
+			"Taux",
 			"Date du taux",
 			"Source",
 			"Date de saisie",
 			""
 		].map((label) => h("th", { attrs: { scope: "col" } }, label)))), h("tbody", null, ...rows.map((row) => rateRow(row, state.demoMode)), addRow()))));
 	};
-	const tools = (state) => {
-		const context = {
-			hasData: state.dataset !== null,
-			presentationMode: state.presentationMode,
-			built
-		};
-		return h("section", {
-			class: "section",
-			attrs: { "aria-label": "Accès aux outils" }
-		}, h("div", { class: "section-head" }, h("h2", { class: "section-title" }, "Outils")), h("div", { class: "home-tools" }, ...toolCards(context).map((card) => {
-			const link = h("a", {
-				class: "tool-card tile",
-				attrs: {
-					href: card.href,
-					"aria-disabled": card.href === null ? "true" : null,
-					[FOCUS_KEY]: `tool-${card.route}`
-				}
-			}, card.internal ? internalMarker() : null, h("span", { class: "tool-card-title" }, card.label), card.reason === null ? null : h("span", { class: "tool-card-note" }, card.reason));
-			return card.internal ? internal(state, () => link) : link;
-		})));
-	};
 	function render() {
 		const state = store.getState();
 		const logos = logosMissing() ? internalBlock(state, h("span", null, LOGOS_MISSING_LABEL)) : null;
-		fill$1(body, h("h1", { class: "page-title" }, "Accueil"), dropZone(state), ...messages(state), logos, report(state), rates(state), tools(state));
+		const texts = pdfTextsMissing(readPdfTexts()) ? internalBlock(state, h("span", { class: "home-pdf-texts" }, PDF_TEXTS_MISSING_LABEL)) : null;
+		fill$1(body, h("h1", { class: "page-title" }, "Accueil"), dropZone(state), ...messages(state), logos, texts, report(state), rates(state));
 	}
 	const onDragOver = (event) => {
 		event.preventDefault();
@@ -33793,116 +33760,6 @@ function mountAccueil(host, store, built) {
 		window.removeEventListener("dragover", onDragOver);
 		window.removeEventListener("dragleave", onDragLeave);
 		window.removeEventListener("drop", onDrop);
-	};
-}
-/** Products without any underlying: a line of its own, outside the ranking. */
-var NO_UNDERLYING_LABEL = "Sans sous-jacent";
-function labelOf(key, { product }) {
-	switch (key) {
-		case "issuer": return product.issuerGroup ?? "Non renseigné";
-		case "category": return product.category;
-		case "protection": return product.protectionLabel ?? "Non renseigné";
-		case "currency": return product.currency ?? "Non renseigné";
-	}
-}
-/** Nominal in EUR, except by currency: valuation in EUR (decision of the chapter). */
-function amountFor(key, holding) {
-	return key === "currency" ? holding.position.marketValueEur : holding.nominalEur;
-}
-function add(groups, key, label, amount, isin) {
-	let group = groups.get(key);
-	if (group === void 0) {
-		group = {
-			label,
-			amount: 0,
-			isins: /* @__PURE__ */ new Set()
-		};
-		groups.set(key, group);
-	}
-	group.amount += amount;
-	group.isins.add(isin);
-}
-function toRows(groups, base) {
-	return [...groups].map((group) => ({
-		label: group.label,
-		value: base === "amount" ? group.amount : group.isins.size,
-		productCount: group.isins.size
-	})).sort((a, b) => b.value - a.value || a.label.localeCompare(b.label, "fr"));
-}
-/** By issuer group, displayed category, protection label or currency. */
-function breakdownBy(key, holdings, base = "amount") {
-	const groups = /* @__PURE__ */ new Map();
-	let used = 0;
-	let discarded = 0;
-	for (const holding of holdings) {
-		const amount = base === "amount" ? amountFor(key, holding) : 0;
-		if (amount === null) {
-			discarded += 1;
-			continue;
-		}
-		used += 1;
-		const label = labelOf(key, holding);
-		add(groups, label, label, amount, holding.product.isin);
-	}
-	const rows = toRows(groups.values(), base);
-	const shares = largestRemainderShares(rows.map((row) => row.value));
-	return {
-		lines: rows.map((row, index) => ({
-			...row,
-			share: shares?.[index] ?? null
-		})),
-		total: rows.reduce((total, row) => total + row.value, 0),
-		used,
-		discarded
-	};
-}
-/**
-* Underlyings: the nominal of a position is split equally between its underlyings, and the
-* weight of an underlying is its share of the total nominal of the scope. « Par nombre »:
-* the number of distinct products that contain the underlying; a product counts for each
-* of its underlyings, so these shares do not add up to 100 %.
-*/
-function breakdownByUnderlying(holdings, base = "amount") {
-	const groups = /* @__PURE__ */ new Map();
-	const none = {
-		label: NO_UNDERLYING_LABEL,
-		amount: 0,
-		isins: /* @__PURE__ */ new Set()
-	};
-	const products = /* @__PURE__ */ new Set();
-	let used = 0;
-	let discarded = 0;
-	for (const holding of holdings) {
-		const amount = base === "amount" ? amountFor("underlying", holding) : 0;
-		if (amount === null) {
-			discarded += 1;
-			continue;
-		}
-		used += 1;
-		const { isin, underlyings } = holding.product;
-		products.add(isin);
-		if (underlyings.length === 0) {
-			none.amount += amount;
-			none.isins.add(isin);
-			continue;
-		}
-		for (const underlying of underlyings) add(groups, normalizeKey(underlying.name), underlying.name, amount / underlyings.length, isin);
-	}
-	const ranked = toRows(groups.values(), base);
-	const apart = none.isins.size === 0 ? [] : toRows([none], base);
-	const all = [...ranked, ...apart];
-	const total = base === "amount" ? all.reduce((sum, row) => sum + row.value, 0) : products.size;
-	const shares = base === "amount" ? largestRemainderShares(all.map((row) => row.value)) : total === 0 ? null : all.map((row) => roundTo(row.value / total * 100, 1));
-	const lines = all.map((row, index) => ({
-		...row,
-		share: shares?.[index] ?? null
-	}));
-	return {
-		lines: lines.slice(0, ranked.length),
-		withoutUnderlying: lines[ranked.length] ?? null,
-		total,
-		used,
-		discarded
 	};
 }
 //#endregion
@@ -34487,7 +34344,7 @@ function informationSheet(content, context) {
 	}
 	rows.push(...accounts === null ? [line("Comptes sélectionnés", "Toute la base")] : listed("Comptes sélectionnés", accounts.map((account) => `${account.id} — ${account.holder ?? ""}`), NONE), line("Lignes exportées", null, content.rowCount));
 	if (fxRates.length === 0) rows.push(line("Taux de change", "Aucun taux saisi"));
-	for (const rate of fxRates) rows.push(line("Taux de change", `${rate.currency} → EUR`, decimal(rate.rateToEur), date(rate.date), rate.source));
+	for (const rate of fxRates) rows.push(line("Taux de change", formatFxRate(rate.currency, rate.unitsPerEur), decimal(rate.unitsPerEur), date(rate.date), rate.source));
 	rows.push(...listed("Filtres actifs", context.filters, NONE));
 	rows.push(...content.extra ?? []);
 	rows.push(...listed("Hypothèses", content.hypotheses, "Sans objet"));
@@ -34560,7 +34417,7 @@ var INVENTORY_EXPORT_COLUMNS = [
 		cell: (row) => decimal(row.underlyings[slot]?.initialLevel ?? null)
 	})),
 	{
-		header: "Performance (points)",
+		header: "Performance (%)",
 		cell: (row) => decimal(row.performance)
 	},
 	{
@@ -34808,6 +34665,116 @@ function sortInventory(rows, columnId, direction = "asc") {
 		});
 		return sign * order || a.index - b.index;
 	}).map((entry) => entry.row);
+}
+/** Products without any underlying: a line of its own, outside the ranking. */
+var NO_UNDERLYING_LABEL = "Sans sous-jacent";
+function labelOf(key, { product }) {
+	switch (key) {
+		case "issuer": return product.issuerGroup ?? "Non renseigné";
+		case "category": return product.category;
+		case "protection": return product.protectionLabel ?? "Non renseigné";
+		case "currency": return product.currency ?? "Non renseigné";
+	}
+}
+/** Nominal in EUR, except by currency: valuation in EUR (decision of the chapter). */
+function amountFor(key, holding) {
+	return key === "currency" ? holding.position.marketValueEur : holding.nominalEur;
+}
+function add(groups, key, label, amount, isin) {
+	let group = groups.get(key);
+	if (group === void 0) {
+		group = {
+			label,
+			amount: 0,
+			isins: /* @__PURE__ */ new Set()
+		};
+		groups.set(key, group);
+	}
+	group.amount += amount;
+	group.isins.add(isin);
+}
+function toRows(groups, base) {
+	return [...groups].map((group) => ({
+		label: group.label,
+		value: base === "amount" ? group.amount : group.isins.size,
+		productCount: group.isins.size
+	})).sort((a, b) => b.value - a.value || a.label.localeCompare(b.label, "fr"));
+}
+/** By issuer group, displayed category, protection label or currency. */
+function breakdownBy(key, holdings, base = "amount") {
+	const groups = /* @__PURE__ */ new Map();
+	let used = 0;
+	let discarded = 0;
+	for (const holding of holdings) {
+		const amount = base === "amount" ? amountFor(key, holding) : 0;
+		if (amount === null) {
+			discarded += 1;
+			continue;
+		}
+		used += 1;
+		const label = labelOf(key, holding);
+		add(groups, label, label, amount, holding.product.isin);
+	}
+	const rows = toRows(groups.values(), base);
+	const shares = largestRemainderShares(rows.map((row) => row.value));
+	return {
+		lines: rows.map((row, index) => ({
+			...row,
+			share: shares?.[index] ?? null
+		})),
+		total: rows.reduce((total, row) => total + row.value, 0),
+		used,
+		discarded
+	};
+}
+/**
+* Underlyings: the nominal of a position is split equally between its underlyings, and the
+* weight of an underlying is its share of the total nominal of the scope. « Par nombre »:
+* the number of distinct products that contain the underlying; a product counts for each
+* of its underlyings, so these shares do not add up to 100 %.
+*/
+function breakdownByUnderlying(holdings, base = "amount") {
+	const groups = /* @__PURE__ */ new Map();
+	const none = {
+		label: NO_UNDERLYING_LABEL,
+		amount: 0,
+		isins: /* @__PURE__ */ new Set()
+	};
+	const products = /* @__PURE__ */ new Set();
+	let used = 0;
+	let discarded = 0;
+	for (const holding of holdings) {
+		const amount = base === "amount" ? amountFor("underlying", holding) : 0;
+		if (amount === null) {
+			discarded += 1;
+			continue;
+		}
+		used += 1;
+		const { isin, underlyings } = holding.product;
+		products.add(isin);
+		if (underlyings.length === 0) {
+			none.amount += amount;
+			none.isins.add(isin);
+			continue;
+		}
+		for (const underlying of underlyings) add(groups, normalizeKey(underlying.name), underlying.name, amount / underlyings.length, isin);
+	}
+	const ranked = toRows(groups.values(), base);
+	const apart = none.isins.size === 0 ? [] : toRows([none], base);
+	const all = [...ranked, ...apart];
+	const total = base === "amount" ? all.reduce((sum, row) => sum + row.value, 0) : products.size;
+	const shares = base === "amount" ? largestRemainderShares(all.map((row) => row.value)) : total === 0 ? null : all.map((row) => roundTo(row.value / total * 100, 1));
+	const lines = all.map((row, index) => ({
+		...row,
+		share: shares?.[index] ?? null
+	}));
+	return {
+		lines: lines.slice(0, ranked.length),
+		withoutUnderlying: lines[ranked.length] ?? null,
+		total,
+		used,
+		discarded
+	};
 }
 var shareLabel = (share) => share === null ? "N/A" : formatPercent(share);
 var products = (count) => `${formatCount(count)} produit${count > 1 ? "s" : ""}`;
@@ -35095,19 +35062,24 @@ function gauge(model) {
 }
 //#endregion
 //#region src/app/components/event-card.ts
-/** Indicative outcome, across the top of the card. Internal: absent in presentation mode. */
+/** Right end of every outcome band: the outcome is an indication, never a promise. */
+var OUTCOME_TAG = "Issue indicative";
+/**
+* Indicative outcome, across the top of the card: the same in presentation mode as in normal
+* mode (docs/produit.md §10). Only the PDF leaves it out.
+*/
 function outcomeBand(banner) {
-	if (banner.kind === "none") return h("div", { class: "outcome-band is-none" }, h("span", { class: "outcome-band-label" }, banner.label), banner.detail === "" ? null : h("span", { class: "outcome-band-detail" }, banner.detail), h("span", { class: "outcome-band-tag" }, "Interne"));
+	if (banner.kind === "none") return h("div", { class: "outcome-band is-none" }, h("span", { class: "outcome-band-label" }, banner.label), banner.detail === "" ? null : h("span", { class: "outcome-band-detail" }, banner.detail), h("span", { class: "outcome-band-tag" }, OUTCOME_TAG));
 	return h("div", {
 		class: "outcome-band",
 		attrs: { "data-outcome": banner.outcome }
-	}, drawIcon(OUTCOME_ICON_PATHS[banner.outcome], 16, 2.6), h("span", { class: "outcome-band-label" }, banner.label), banner.detail === null ? null : h("span", { class: "outcome-band-detail" }, banner.detail), h("span", { class: "outcome-band-tag" }, "Issue indicative"));
+	}, drawIcon(OUTCOME_ICON_PATHS[banner.outcome], 16, 2.6), h("span", { class: "outcome-band-label" }, banner.label), banner.detail === null ? null : h("span", { class: "outcome-band-detail" }, banner.detail), h("span", { class: "outcome-band-tag" }, OUTCOME_TAG));
 }
 function eventCard(model, mode) {
 	return h("article", {
 		class: "event-card tile",
 		attrs: { "aria-label": `${model.name}, ${model.typeLabel} du ${model.date}` }
-	}, internal(mode, () => outcomeBand(model.banner)), h("div", { class: "event-card-body" }, h("div", { class: "event-card-head" }, h("div", {
+	}, outcomeBand(model.banner), h("div", { class: "event-card-body" }, h("div", { class: "event-card-head" }, h("div", {
 		class: "event-date",
 		attrs: { "aria-hidden": "true" }
 	}, h("span", { class: "event-date-day" }, model.day), h("span", { class: "event-date-month" }, model.month)), h("div", { class: "event-card-title" }, h("h3", { class: "event-card-name" }, model.name), model.holding === null ? null : h("p", { class: "event-card-holding" }, model.holding), h("div", { class: "event-card-pills" }, h("span", { class: "pill" }, model.typeLabel), model.past ? internal(mode, () => h("span", { class: "pill pill-internal" }, internalMarker(), model.countdownLabel)) : h("span", { class: `pill${model.soon ? " is-soon" : ""}` }, model.countdownLabel)))), model.gauge === null ? h("p", { class: "event-card-reference" }, NO_REFERENCE_LEVEL_LABEL) : h("div", { class: "event-card-gauge" }, model.reference === null ? null : h("p", { class: "event-card-reference" }, model.reference), gauge(model.gauge)), h("div", { class: `barrier-chips${model.chips.length === 2 ? " is-pair" : ""}` }, ...model.chips.map((chip) => h("div", { class: "barrier-chip" }, h("span", { class: "barrier-chip-label" }, chip.label), h("span", { class: "barrier-chip-level" }, chip.level), chip.distance === null ? null : h("span", { class: "barrier-chip-distance" }, chip.distance), chip.note === null ? null : h("span", { class: "barrier-chip-note" }, chip.note))))));
@@ -35219,7 +35191,7 @@ function gaugeModel(input, scale = commonScale([input])) {
 		overflow: level < scale.min ? "low" : level > scale.max ? "high" : null
 	};
 	const described = [...barriers].sort((a, b) => b.barrier.level - a.barrier.level).map(({ kind, barrier }) => {
-		const distance = barrier.distance === null ? "" : ` (${formatPoints(barrier.distance)} pts)`;
+		const distance = barrier.distance === null ? "" : ` (${formatDistance(barrier.distance)})`;
 		return `${BARRIER_NAMES[kind]} ${formatLevel(barrier.level)}${distance}`;
 	});
 	return {
@@ -35232,7 +35204,7 @@ function gaugeModel(input, scale = commonScale([input])) {
 }
 //#endregion
 //#region src/app/components/event-card-model.ts
-var points = (distance) => distance === null ? null : `${formatPoints(distance)} pts`;
+var distanceLabel = (distance) => distance === null ? null : formatDistance(distance);
 function levelChip(label, barrier) {
 	if (barrier === null) return {
 		label,
@@ -35249,7 +35221,7 @@ function levelChip(label, barrier) {
 	return {
 		label,
 		level: formatLevel(barrier.level),
-		distance: points(barrier.distance),
+		distance: distanceLabel(barrier.distance),
 		note: barrier.provisional === null ? null : PROVISIONAL_BARRIER_LABELS[barrier.provisional]
 	};
 }
@@ -35757,17 +35729,77 @@ function summaryTile(model) {
 	return h("section", {
 		class: "hero on-brand",
 		attrs: { "aria-label": "Synthèse" }
-	}, h("div", { class: "hero-head" }, h("div", null, h("p", { class: "hero-overline" }, model.overline), h("h1", { class: "hero-title" }, model.title)), h("span", { class: "hero-pill" }, model.products)), h("div", null, h("p", { class: "hero-label" }, model.nominalLabel), h("p", { class: "hero-nominal" }, model.nominal), h("p", { class: "hero-valuation" }, model.valuation), model.coverage === null ? null : h("p", { class: "hero-coverage" }, model.coverage)));
+	}, h("div", { class: "hero-head" }, h("div", null, h("p", { class: "hero-overline" }, model.overline), h("h1", { class: "hero-title" }, model.title)), model.products === null ? null : h("span", { class: "hero-pill" }, model.products)), h("div", null, h("p", { class: "hero-label" }, model.nominalLabel), h("p", { class: "hero-nominal" }, model.nominal), h("p", { class: "hero-valuation" }, model.valuation), model.coverage === null ? null : h("p", { class: "hero-coverage" }, model.coverage)));
 }
 function indicatorTiles(models) {
 	return h("section", {
 		class: "indicators",
 		attrs: { "aria-label": "Indicateurs" }
-	}, ...models.map((model) => h("div", { class: "indicator tile" }, h("span", { class: "indicator-icon" }, icon(model.icon, 18, 1.9)), h("p", { class: "indicator-label" }, model.label), h("p", { class: "indicator-value" }, model.value), model.subline === null ? null : h("p", { class: "indicator-subline" }, model.subline), model.coverage === null ? null : h("p", { class: "indicator-subline" }, model.coverage))));
+	}, ...models.map((model) => h("div", {
+		class: "indicator tile",
+		attrs: { "data-indicator": model.id }
+	}, h("span", { class: "indicator-icon" }, icon(model.icon, 18, 1.9)), h("p", { class: "indicator-label" }, model.label), h("p", { class: "indicator-value" }, model.value), model.subline === null ? null : h("p", { class: "indicator-subline" }, model.subline), model.coverage === null ? null : h("p", { class: "indicator-subline" }, model.coverage))));
 }
 /** The two blocks side by side, of the same height. */
 function summaryRow$1(summary, indicators) {
 	return h("div", { class: "summary-row" }, summaryTile(summary), indicatorTiles(indicators));
+}
+//#endregion
+//#region src/app/router.ts
+var ROUTES = [
+	{
+		id: "accueil",
+		label: "Accueil",
+		internal: false,
+		parent: null
+	},
+	{
+		id: "dashboard",
+		label: "Dashboard",
+		internal: false,
+		parent: null
+	},
+	{
+		id: "analyse",
+		label: "Analyse PS",
+		internal: false,
+		parent: null
+	},
+	{
+		id: "simulateur",
+		label: "Simulateur",
+		internal: false,
+		parent: "analyse"
+	},
+	{
+		id: "porteurs",
+		label: "Liste des porteurs",
+		internal: true,
+		parent: null
+	}
+];
+var DEFAULT_ROUTE = "accueil";
+var hashOf = (route) => `#/${route}`;
+/** The page an address asks for; the home page when the fragment is empty or unknown. */
+function routeOf(hash) {
+	const id = hash.replace(/^#\/?/, "").split(/[/?]/)[0] ?? "";
+	return ROUTES.find((route) => route.id === id)?.id ?? "accueil";
+}
+/** Why a page cannot be opened now; null when it can. */
+function unavailableReason(route, context) {
+	if (!context.built.has(route)) return "Page à venir";
+	if (route !== "accueil" && !context.hasData) return "Chargez d’abord les deux bases";
+	return null;
+}
+/** Routes shown in the navigation: the internal ones disappear in presentation mode. */
+function visibleRoutes(context) {
+	return ROUTES.filter((route) => !(route.internal && context.presentationMode));
+}
+/** The page really shown for an address: the home page when the one asked for cannot be opened. */
+function resolveRoute(hash, context) {
+	const asked = routeOf(hash);
+	if (ROUTES.find((candidate) => candidate.id === asked).internal && context.presentationMode) return DEFAULT_ROUTE;
+	return unavailableReason(asked, context) === null ? asked : DEFAULT_ROUTE;
 }
 //#endregion
 //#region src/app/components/tabs.ts
@@ -35807,7 +35839,6 @@ function amounts(indicators) {
 	const { nominalInvestedEur: nominal, marketValueEur: valuation } = indicators;
 	const coverage = [coverageLabel(nominal.discarded), valuation.discarded.missingMarketValue === void 0 ? null : coverageLabel(valuation.discarded)].filter((part) => part !== null);
 	return {
-		products: plural$3(indicators.productCount, "produit"),
 		nominal: nominal.value === null ? "N/A" : formatAmount(nominal.value, "EUR"),
 		valuation: `Valorisation actuelle ${valuation.value === null ? "N/A" : formatAmount(valuation.value, "EUR")}`,
 		coverage: coverage.length === 0 ? null : coverage.join(" ; ")
@@ -35818,6 +35849,7 @@ function summaryModel(accounts, asOfDate, indicators) {
 		overline: `${accounts.length > 1 ? "Analyse consolidée" : "Analyse"} · ${plural$3(accounts.length, "compte")} · arrêté au ${formatDate(asOfDate)}`,
 		title: holdersTitle(accounts),
 		nominalLabel: "Nominal investi",
+		products: null,
 		...amounts(indicators)
 	};
 }
@@ -35835,8 +35867,8 @@ function dashboardSummaryModel(accountCount, asOfDate, indicators) {
 	};
 }
 /** Global indicators of the Dashboard next to the tile: average yield and average maturity. */
-function dashboardIndicatorModels(indicators, currency) {
-	return indicatorModels(indicators, currency).filter((model) => model.id === "yield" || model.id === "maturity").map((model) => model.id === "yield" ? {
+function dashboardIndicatorModels(indicators) {
+	return indicatorModels(indicators).filter((model) => model.id === "yield" || model.id === "maturity").map((model) => model.id === "yield" ? {
 		...model,
 		label: "Rendement moyen"
 	} : {
@@ -35844,11 +35876,8 @@ function dashboardIndicatorModels(indicators, currency) {
 		label: "Maturité moyenne"
 	});
 }
-/** `currency` is the breakdown of the valuation by currency (regles-metier.md §3: on the valuation). */
-function indicatorModels(indicators, currency) {
+function indicatorModels(indicators) {
 	const { averageConditionalYield: yieldRate, averageResidualMaturityYears: maturity, couponsDistributedEur: coupons } = indicators;
-	const [main, ...others] = currency.lines;
-	const share = (line) => `${line.label} ${line.share === null ? "N/A" : formatPercent(line.share)}`;
 	return [
 		{
 			id: "yield",
@@ -35875,12 +35904,12 @@ function indicatorModels(indicators, currency) {
 			coverage: coverageLabel(coupons.discarded)
 		},
 		{
-			id: "currency",
-			icon: "globe",
-			label: "Exposition devise",
-			value: main === void 0 ? "N/A" : share(main),
-			subline: others.length === 0 ? null : others.map(share).join(" · "),
-			coverage: currency.discarded === 0 ? null : coverageLabel({ missingMarketValue: currency.discarded })
+			id: "products",
+			icon: "layers",
+			label: "Nombre de produits",
+			value: formatCount(indicators.productCount),
+			subline: "en cours de vie, comptés une fois chacun",
+			coverage: null
 		}
 	];
 }
@@ -36008,17 +36037,14 @@ function buildDisclaimers(positions, asOfDate, fxRates) {
 var CONTACT_ROLES = ["Gérant", "Banquier privé"];
 var PDF_TITLE = "Reporting Produits Structurés";
 var DEMO_MENTION = "Données fictives";
-/** Written in place of a text of the V1 that the chapters do not hold (docs/produit.md §9 and §13 point 7). */
-var V1_TEXT_MISSING = "[texte V1 à fournir]";
-/** The chapter only quotes the first words of the general mention: the rest is not written here. */
-var GENERAL_MENTION = `Bien que les informations contenues dans ce rapport proviennent de sources jugées fiables… ${V1_TEXT_MISSING}`;
 var RISK_BOX_TITLE = "Suivi des risques";
+/** Small block at the bottom of the indicators page: generated mentions and exchange rates used. */
+var NOTES_TITLE = "À noter";
 /** Titles of the sections, written at the top of each of their pages. */
 var PDF_SECTIONS = {
 	indicators: "Indicateurs et graphiques",
 	inventory: "Inventaire détaillé",
-	observations: "Prochaines constatations",
-	methodology: "Méthodologie et sources"
+	observations: "Prochaines constatations"
 };
 /** The name proposed for the client: the distinct holders of the accounts, in the order of the selection. */
 function defaultClientName(accounts) {
@@ -36043,39 +36069,16 @@ var BARRIER_LABELS = {
 	Coupon: "Barrière coupon",
 	Capital: "Barrière capital"
 };
-/** Definitions of the indicators, as regles-metier.md §3 and §4 state them. */
-var PDF_DEFINITIONS = [
-	"Nominal investi : somme des nominaux des positions, convertis en euros. La valorisation actuelle est la somme des valorisations en euros.",
-	"Rendement conditionnel moyen : coupon par an des produits, pondéré par le nominal. Les produits de participation n’y entrent pas.",
-	"Maturité résiduelle moyenne : durée de la date d’arrêté à la dernière constatation, pondérée par le nominal.",
-	"Coupons distribués : cumul des coupons détachés depuis l’émission des produits, en supposant chaque produit détenu depuis son émission.",
-	"Répartitions : en part du nominal en euros ; le nominal d’une position est réparti à parts égales entre ses sous-jacents. La répartition par devise et l’exposition devise sont calculées sur la valorisation.",
-	"Distances aux barrières : en points de pourcentage du niveau initial."
-];
-function sources(dataset, today) {
-	const { asOfDate, productsFile, positionsFile } = dataset.context;
-	const { minPositionDate: first, maxPositionDate: last } = positionsFile;
-	const positions = first === null || last === null ? "N/A" : first === last ? formatDate(first) : `du ${formatDate(first)} au ${formatDate(last)}`;
-	return [
-		{
-			label: "Date d’arrêté",
-			value: `${formatDate(asOfDate)} (${productsFile.extractionDate === asOfDate ? "date de l’extraction de la base produits" : "saisie au chargement"})`
-		},
-		{
-			label: "Date des positions",
-			value: positions
-		},
-		{
-			label: "Document établi le",
-			value: formatDate(today)
-		}
-	];
+/** « Taux de change au 02/10/2026 : 1 EUR = 1,2500 USD (BCE) ». A date or a source that is missing is said, never left blank. */
+function rateNote(rate) {
+	return `${rate.date === null ? "Taux de change (date non renseignée)" : `Taux de change au ${formatDate(rate.date)}`} : ${formatFxRate(rate.currency, rate.unitsPerEur)} (${rate.source ?? "source non renseignée"})`;
 }
 /**
 * The whole document, for the accounts ticked in the parameters. `today` is the day the
-* document is produced, given by the caller: nothing here reads the clock.
+* document is produced and `texts` what the file holds for the texts of the V1, both given
+* by the caller: nothing here reads the clock nor the page.
 */
-function pdfDocumentModel(state, parameters, today) {
+function pdfDocumentModel(state, parameters, today, texts) {
 	const { dataset } = state;
 	if (dataset === null) throw new Error("Aucune donnée chargée : rien à imprimer.");
 	const scope = {
@@ -36123,10 +36126,7 @@ function pdfDocumentModel(state, parameters, today) {
 				}
 			],
 			reference: level === null || card.reference === null ? NO_REFERENCE_LEVEL_LABEL : `${card.reference} — ${formatPercent(level, 1)}`,
-			gauge: card.gauge === null ? null : {
-				...card.gauge,
-				zones: []
-			},
+			gauge: card.gauge,
 			barriers: card.chips.map((chip) => ({
 				label: BARRIER_LABELS[chip.label] ?? chip.label,
 				level: chip.level,
@@ -36144,43 +36144,36 @@ function pdfDocumentModel(state, parameters, today) {
 			asOf: `Arrêté au ${formatDate(asOfDate)}`,
 			contact: contactName === "" ? parameters.contactRole : `${contactName} — ${parameters.contactRole}`
 		},
-		nominalLabel: `Nominal global PS : ${nominal === null ? "N/A" : formatAmount(nominal, "EUR")}`,
+		nominalLabel: `Nominal global : ${nominal === null ? "N/A" : formatAmount(nominal, "EUR")}`,
 		summary: {
 			...summaryModel(accounts, asOfDate, indicators),
 			title: parameters.clientName.trim()
 		},
-		indicators: indicatorModels(indicators, breakdownBy("currency", holdings, "amount")),
+		indicators: indicatorModels(indicators),
 		breakdowns: analysisBreakdowns(holdings, "amount"),
 		disclaimer: ANALYSIS_DISCLAIMER,
-		riskText: V1_TEXT_MISSING,
+		riskText: (texts.risk ?? "[texte V1 à fournir]").split(/\n\s*\n/).map((paragraph) => paragraph.replace(/\s+/g, " ").trim()),
 		inventory: inventoryModel(buildInventory(holdings), INITIAL_INVENTORY_VIEW, accounts.length > 1),
 		observations,
 		undated: undatedNote(agenda.undated),
-		methodology: {
-			sources: sources(dataset, today),
-			rates: rates.map((rate) => ({
-				currency: `${rate.currency} → EUR`,
-				rate: String(rate.rateToEur).replace(".", ","),
-				date: rate.date === null ? "N/A" : formatDate(rate.date),
-				source: rate.source ?? "N/A"
-			})),
-			noRate: rates.length > 0 ? null : used.length === 0 ? "Toutes les positions sont en euros : aucun taux de change n’est utilisé." : "Aucun taux de change n’est renseigné.",
-			definitions: PDF_DEFINITIONS,
-			mentions: buildDisclaimers(selectedPositions(scope), asOfDate, dataset.context.fxRates).map((disclaimer) => disclaimer.text),
-			general: GENERAL_MENTION
-		}
+		notes: [...buildDisclaimers(selectedPositions(scope), asOfDate, dataset.context.fxRates).map((disclaimer) => disclaimer.text), ...rates.map(rateNote)],
+		generalMention: (texts.general ?? "[texte V1 à fournir]").replace(/\s+/g, " ").trim()
 	};
 }
 //#endregion
 //#region src/app/pages/pdf.ts
 /** A logo that is there, or an empty place: neither dashes nor a « logo » text (page a). */
 var logoOrNothing = (name, className) => h("div", { class: className }, logoImage(name, "", "print-logo-image"));
+/**
+* Cover: the text on the left, the squares on the right, the BPCE logo at the bottom right.
+* The Natixis logo is at the bottom left, in the footer shared by every page (pageRules).
+*/
 function cover(model) {
 	const { cover: page } = model;
-	return h("section", { class: "print-cover" }, h("div", { class: "print-cover-logos" }, logoOrNothing("natixis", "print-logo"), logoOrNothing("bpce", "print-logo")), h("div", { class: "print-cover-body" }, h("div", { class: "print-cover-text" }, h("h1", { class: "print-cover-title" }, page.title), h("p", { class: "print-cover-client" }, page.clientName), h("ul", { class: "print-cover-accounts" }, ...page.accounts.map((account) => h("li", null, account))), h("p", { class: "print-cover-line" }, page.asOf), h("p", { class: "print-cover-line" }, page.contact)), logoOrNothing("carres", "print-cover-graphic")));
+	return h("section", { class: "print-cover" }, h("div", { class: "print-cover-body" }, h("div", { class: "print-cover-text" }, h("h1", { class: "print-cover-title" }, page.title), h("p", { class: "print-cover-client" }, page.clientName), h("ul", { class: "print-cover-accounts" }, ...page.accounts.map((account) => h("li", null, account))), h("p", { class: "print-cover-line" }, page.asOf), h("p", { class: "print-cover-line" }, page.contact)), logoOrNothing("carres", "print-cover-graphic")), h("div", { class: "print-cover-foot" }, logoOrNothing("bpce", "print-cover-bpce")));
 }
 function indicators(model) {
-	return h("section", { class: "print-section print-indicators" }, h("div", { class: "summary-row" }, summaryTile(model.summary), indicatorTiles(model.indicators)), h("p", { class: "print-disclaimer" }, model.disclaimer), h("div", { class: "breakdowns" }, ...model.breakdowns.map((tile) => breakdownTile(tile))), h("div", { class: "print-box" }, h("h2", { class: "print-box-title" }, RISK_BOX_TITLE), h("p", null, model.riskText)));
+	return h("section", { class: "print-section print-indicators" }, h("div", { class: "summary-row" }, summaryTile(model.summary), indicatorTiles(model.indicators)), h("p", { class: "print-disclaimer" }, model.disclaimer), h("div", { class: "breakdowns" }, ...model.breakdowns.map((tile) => breakdownTile(tile))), h("div", { class: "print-box" }, h("h2", { class: "print-box-title" }, RISK_BOX_TITLE), ...model.riskText.map((paragraph) => h("p", null, paragraph))), model.notes.length === 0 ? null : h("div", { class: "print-box print-notes" }, h("h2", { class: "print-box-title" }, NOTES_TITLE), h("ul", { class: "print-list" }, ...model.notes.map((note) => h("li", null, note)))));
 }
 function inventory(model) {
 	const table = model.inventory;
@@ -36190,49 +36183,55 @@ function inventory(model) {
 	}, column.label)))), h("tbody", null, ...table.rows.map((row) => h("tr", null, ...row.cells.map((cell, index) => h("td", { class: `col-${table.columns[index]?.id ?? ""} tone-${cell.tone}${table.columns[index]?.numeric === true ? " is-numeric" : ""}` }, ...cell.lines.map((line) => h("div", { class: "cell-line" }, line)), ...cell.sublines.map((subline) => h("div", { class: "cell-sub" }, subline)))))))));
 }
 function observations(model) {
-	return h("section", { class: "print-section print-observations" }, h("h2", { class: "print-title" }, PDF_SECTIONS.observations), model.observations.length === 0 ? h("p", null, "Aucune constatation à venir pour ces comptes.") : null, h("div", { class: "print-cards" }, ...model.observations.map((observation) => h("article", { class: "print-card" }, h("h3", { class: "print-card-name" }, observation.name), h("dl", { class: "print-facts" }, ...observation.facts.flatMap((fact) => [h("dt", null, fact.label), h("dd", null, fact.value)])), h("p", { class: "print-card-reference" }, observation.reference), observation.gauge === null ? null : gauge(observation.gauge), h("dl", { class: "print-facts" }, ...observation.barriers.flatMap((barrier) => [h("dt", null, barrier.label), h("dd", null, [
+	return h("section", { class: "print-section print-observations" }, h("h2", { class: "print-title" }, PDF_SECTIONS.observations), model.observations.length === 0 ? h("p", null, "Aucune constatation à venir pour ces comptes.") : null, h("div", { class: "print-cards" }, ...model.observations.map((observation) => h("article", { class: "print-card" }, h("h3", { class: "print-card-name" }, observation.name), h("dl", { class: "print-facts print-facts-pairs" }, ...observation.facts.flatMap((fact) => [h("dt", null, fact.label), h("dd", null, fact.value)])), h("p", { class: "print-card-reference" }, observation.reference), observation.gauge === null ? null : gauge(observation.gauge), h("dl", { class: "print-facts" }, ...observation.barriers.flatMap((barrier) => [h("dt", null, barrier.label), h("dd", null, [
 		barrier.level,
 		barrier.distance,
 		barrier.note
 	].filter((part) => part !== null).join(" · "))]))))), model.undated === null ? null : h("p", { class: "print-disclaimer" }, model.undated));
 }
-function methodology(model) {
-	const { methodology: page } = model;
-	const block = (title, ...children) => h("div", { class: "print-block" }, h("h3", { class: "print-box-title" }, title), ...children);
-	return h("section", { class: "print-section print-methodology" }, h("h2", { class: "print-title" }, PDF_SECTIONS.methodology), block("Sources", h("dl", { class: "print-facts" }, ...page.sources.flatMap((fact) => [h("dt", null, fact.label), h("dd", null, fact.value)]))), block("Taux de change utilisés", page.noRate !== null ? h("p", null, page.noRate) : h("table", { class: "data-table print-table print-rates" }, h("thead", null, h("tr", null, ...[
-		"Devise",
-		"Taux",
-		"Date du taux",
-		"Source"
-	].map((label) => h("th", { attrs: { scope: "col" } }, label)))), h("tbody", null, ...page.rates.map((rate) => h("tr", null, h("td", null, rate.currency), h("td", null, rate.rate), h("td", null, rate.date), h("td", null, rate.source)))))), block("Définitions", h("ul", { class: "print-list" }, ...page.definitions.map((definition) => h("li", null, definition)))), block("Mentions", page.mentions.length === 0 ? h("p", null, "Aucune mention particulière pour ces comptes.") : h("ul", { class: "print-list" }, ...page.mentions.map((mention) => h("li", null, mention)))), block("Mention générale", h("p", null, page.general)));
-}
 function printRoot(model) {
-	return h("div", { class: "print-root" }, cover(model), indicators(model), inventory(model), observations(model), methodology(model));
+	return h("div", { class: "print-root" }, cover(model), indicators(model), inventory(model), observations(model), logoImage("natixis", "", "print-preload"));
 }
 var quoted = (text) => `"${text.replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"`;
+/** Arial everywhere in the document, margins included (docs/design.md §11); the screen keeps its own font. */
+var PDF_FONT_FAMILY = "Arial, \"Helvetica Neue\", Helvetica, sans-serif";
+/** Footer logo: its height, the widest it may be, and the width kept for it at the bottom left of every page. */
+var FOOTER_LOGO_HEIGHT_MM = 8;
+var FOOTER_LOGO_MAX_WIDTH_MM = 34;
+var FOOTER_LOGO_BOX_MM = 38;
+var PX_PER_MM = 96 / 25.4;
+/**
+* The Natixis logo as the content of its margin box, never as a background: it is printed
+* whatever the « background graphics » setting of the print window. `image-set` gives the
+* image its printed size: so many of its own pixels for one CSS pixel.
+*/
+function footerLogo(size) {
+	if (size === null || size.width <= 0 || size.height <= 0) return "\"\"";
+	const density = Math.max(size.height / (FOOTER_LOGO_HEIGHT_MM * PX_PER_MM), size.width / (FOOTER_LOGO_MAX_WIDTH_MM * PX_PER_MM));
+	return `image-set(url(${LOGO_FILES.natixis}) ${density.toFixed(4)}x)`;
+}
 /**
 * Rules of the printed pages, written when the document is printed: A4 landscape, the
-* title of the section and the global nominal at the top, the logo, the general mention
-* and « page X / Y » at the bottom. The colours are read from the tokens of the light theme.
+* title of the section and the global nominal at the top; at the bottom the Natixis logo,
+* the general mention and « X / Y ». The colours are read from the tokens of the light theme.
 */
 function pageRules(model) {
 	const tokens = getComputedStyle(document.documentElement);
 	const color = (name) => tokens.getPropertyValue(name).trim();
-	const font = (weight, size) => `font: ${weight} ${size} "Plus Jakarta Sans", sans-serif;`;
-	const logo = logoState().natixis === true;
+	const font = (weight, size) => `font: ${weight} ${size} ${PDF_FONT_FAMILY};`;
 	const header = (name, title) => `@page ${name} { @top-left { content: ${quoted(title)}; ${font(600, "9pt")} color: ${color("--ink-2")}; } }`;
 	return [
 		`@page { size: A4 landscape; margin: 16mm 12mm 14mm 12mm;`,
 		`  @top-right { content: ${quoted(model.nominalLabel)}; ${font(600, "9pt")} color: ${color("--ink-2")}; }`,
 		model.demo ? `  @top-center { content: ${quoted(DEMO_MENTION)}; ${font(700, "9pt")} color: ${color("--ink-2")}; }` : "",
-		`  @bottom-left { content: ${quoted(model.methodology.general)}; ${font(400, "6pt")} color: ${color("--ink-3")}; text-align: left; vertical-align: middle;${logo ? ` padding-left: 24mm; background: url(${LOGO_FILES.natixis}) no-repeat left center / auto 6mm;` : ""} }`,
-		`  @bottom-right { content: "page " counter(page) " / " counter(pages); ${font(600, "8pt")} color: ${color("--ink-2")}; }`,
+		`  @bottom-left { content: ${footerLogo(logoSize("natixis"))}; width: ${FOOTER_LOGO_BOX_MM}mm; text-align: left; vertical-align: middle; }`,
+		`  @bottom-center { content: ${quoted(model.generalMention)}; ${font(400, "6pt")} color: ${color("--ink-3")}; text-align: left; vertical-align: middle; }`,
+		`  @bottom-right { content: counter(page) " / " counter(pages); width: ${FOOTER_LOGO_BOX_MM}mm; ${font(600, "8pt")} color: ${color("--ink-2")}; text-align: right; vertical-align: middle; }`,
 		`}`,
-		`@page garde { @top-right { content: none; } @top-center { content: ${model.demo ? quoted(DEMO_MENTION) : "none"}; } }`,
+		`@page garde { @top-right { content: none; } @top-center { content: ${model.demo ? quoted(DEMO_MENTION) : "none"}; } @bottom-right { content: ""; } }`,
 		header("indicateurs", PDF_SECTIONS.indicators),
 		header("inventaire", PDF_SECTIONS.inventory),
-		header("constatations", PDF_SECTIONS.observations),
-		header("methodologie", PDF_SECTIONS.methodology)
+		header("constatations", PDF_SECTIONS.observations)
 	].join("\n");
 }
 /** Builds the document, waits for its images and its fonts, then hands it to the printing of the browser. */
@@ -36322,7 +36321,7 @@ function openPdfDialog(store) {
 			fill$1(error, refused);
 			return;
 		}
-		const model = pdfDocumentModel(store.getState(), parameters, today());
+		const model = pdfDocumentModel(store.getState(), parameters, today(), readPdfTexts());
 		close();
 		printDocument(model);
 	};
@@ -36399,7 +36398,7 @@ function mountAnalyse(host, store) {
 		fill$1(body, analysisTabs("analyse"), h("h1", { class: "visually-hidden" }, "Analyse PS"), selectionBar(selectionChips(accounts), {
 			onRemove: (accountId) => store.dispatch((session) => deselectAccount(session, accountId)),
 			onClear: () => store.dispatch(clearSelection)
-		}), summaryRow$1(summaryModel(accounts, asOfDate, indicators), indicatorModels(indicators, breakdownBy("currency", holdings, "amount"))), h("p", { class: "disclaimer" }, ANALYSIS_DISCLAIMER), excluded === null ? null : internalBlock(state, h("span", { class: "excluded-title" }, excluded.title), h("span", null, excluded.reasons), h("span", { class: "excluded-detail" }, excluded.lines.map((line) => `${line.reason} : ${line.isin}, compte ${line.account}`).join(" ; ")), button({
+		}), summaryRow$1(summaryModel(accounts, asOfDate, indicators), indicatorModels(indicators)), h("p", { class: "disclaimer" }, ANALYSIS_DISCLAIMER), excluded === null ? null : internalBlock(state, h("span", { class: "excluded-title" }, excluded.title), h("span", null, excluded.reasons), h("span", { class: "excluded-detail" }, excluded.lines.map((line) => `${line.reason} : ${line.isin}, compte ${line.account}`).join(" ; ")), button({
 			label: "Voir le détail",
 			variant: "quiet",
 			unavailable: "Panneau Qualité à venir"
@@ -36518,7 +36517,7 @@ function mountDashboard(host, store) {
 		}, ...basesBanner(summary).map((item) => h("div", { class: "bases-item" }, h("p", { class: "indicator-label" }, item.label), h("p", { class: "bases-value" }, item.value), item.line === null ? null : h("p", { class: "indicator-subline" }, item.line)))), h("section", {
 			class: "section",
 			attrs: { "aria-label": "Prochaines constatations" }
-		}, h("div", { class: "section-head" }, h("h2", { class: "section-title" }, "Prochaines constatations"), h("span", { class: "section-note" }, upcomingNote(upcoming.length))), upcoming.length === 0 ? h("p", { class: "page-help" }, NO_UPCOMING_LABEL) : eventGrid(upcoming.map((entry) => eventCardModel(entry, scale, today(), "dashboard")), state, false)), summaryRow$1(dashboardSummaryModel(dataset.accounts.length, asOfDate, indicators), dashboardIndicatorModels(indicators, breakdownBy("currency", holdings, "amount"))), breakdownSection(dashboardBreakdowns(holdings, base, underlyingsOf(computed)), base, (next) => {
+		}, h("div", { class: "section-head" }, h("h2", { class: "section-title" }, "Prochaines constatations"), h("span", { class: "section-note" }, upcomingNote(upcoming.length))), upcoming.length === 0 ? h("p", { class: "page-help" }, NO_UPCOMING_LABEL) : eventGrid(upcoming.map((entry) => eventCardModel(entry, scale, today(), "dashboard")), state, false)), summaryRow$1(dashboardSummaryModel(dataset.accounts.length, asOfDate, indicators), dashboardIndicatorModels(indicators)), breakdownSection(dashboardBreakdowns(holdings, base, underlyingsOf(computed)), base, (next) => {
 			base = next;
 			render();
 		}, {
@@ -37587,7 +37586,7 @@ function mountPorteurs(host, store) {
 function summarizeSimulation(simulation) {
 	return simulation.positions.map((position) => {
 		const { holding, events } = position;
-		const { product, nominal, rateToEur } = holding;
+		const { product, nominal, unitsPerEur } = holding;
 		const common = {
 			position,
 			accountId: holding.position.accountId,
@@ -37624,8 +37623,8 @@ function summarizeSimulation(simulation) {
 			status: position.simulation.status,
 			statusDate: position.simulation.endDate,
 			reason: null,
-			totalCouponsEur: rateToEur === null ? null : totalCoupons * rateToEur,
-			capitalRepaidEur: rateToEur === null || capitalRepaid === null ? null : capitalRepaid * rateToEur
+			totalCouponsEur: unitsPerEur === null ? null : toEur(totalCoupons, unitsPerEur),
+			capitalRepaidEur: unitsPerEur === null || capitalRepaid === null ? null : toEur(capitalRepaid, unitsPerEur)
 		};
 	});
 }
@@ -37924,7 +37923,7 @@ function monthsBetween(first, last) {
 }
 function positionEvents(holding, simulation) {
 	if (!simulation.simulated) return [];
-	const { nominal, rateToEur } = holding;
+	const { nominal, unitsPerEur } = holding;
 	return simulation.events.map((event) => {
 		const coupon = amountOf(event.couponPaidPct, nominal);
 		const capital = event.capitalPct === null ? null : amountOf(event.capitalPct, nominal);
@@ -37933,8 +37932,8 @@ function positionEvents(holding, simulation) {
 			coupon,
 			capital,
 			total: coupon + (capital ?? 0),
-			couponEur: rateToEur === null ? null : coupon * rateToEur,
-			capitalEur: rateToEur === null || capital === null ? null : capital * rateToEur
+			couponEur: unitsPerEur === null ? null : toEur(coupon, unitsPerEur),
+			capitalEur: unitsPerEur === null || capital === null ? null : toEur(capital, unitsPerEur)
 		};
 	});
 }
@@ -37970,7 +37969,7 @@ function simulatePortfolio(holdings, parameters) {
 	let capitalEur = 0;
 	for (const { holding, simulation, events } of positions) {
 		if (!simulation.simulated) continue;
-		if (holding.rateToEur === null) {
+		if (holding.unitsPerEur === null) {
 			const currency = holding.product.currency;
 			const flow = withoutRate.get(currency) ?? {
 				positions: 0,
@@ -38716,6 +38715,11 @@ function excludedNote(excludedCount) {
 //#endregion
 //#region src/app/pages/simulateur.ts
 var SIMULATOR_HELP = "Choisissez d’abord un ou plusieurs comptes avec la recherche : le simulateur porte sur les comptes de l’Analyse PS.";
+/**
+* Height of the console on two rows of controls: two controls of 40 px, the gap between the
+* rows, the padding and the border of the band. Above, the console is not pinned.
+*/
+var PINNED_CONSOLE_MAX_HEIGHT = 124;
 var FLOW_MODES = [{
 	value: "monthly",
 	label: "Par mois"
@@ -38754,7 +38758,7 @@ function mountSimulateur(host, store) {
 		attrs: { role: "status" }
 	});
 	const productsHost = h("div", { class: "sim-products scroll" });
-	const counter = h("span", { class: "section-note" });
+	const counter = h("span", { class: "sim-menu-count" });
 	const allHost = h("span", null);
 	const slider = h("input", {
 		class: "sim-slider",
@@ -38776,16 +38780,49 @@ function mountSimulateur(host, store) {
 		type: "checkbox",
 		id: "sim-compare"
 	} });
-	const group = (title, ...children) => h("div", { class: "sim-group" }, h("h3", { class: "sim-group-title" }, title), ...children);
-	const consolePanel = h("aside", {
-		class: "sim-console tile scroll",
+	const productsMenu = h("details", { class: "sim-menu" }, h("summary", {
+		class: "btn btn-toolbar sim-menu-button",
+		attrs: { [FOCUS_KEY]: "sim-products-menu" }
+	}, h("span", null, "Produits"), counter, h("span", {
+		class: "sim-menu-chevron",
+		attrs: { "aria-hidden": "true" }
+	}, icon("sortDown", 14, 2.2))), h("div", { class: "sim-menu-panel tile" }, h("div", { class: "sim-menu-head" }, h("span", { class: "sim-menu-title" }, "Produits de la simulation"), allHost), productsHost));
+	const group = (title, modifier, ...children) => h("div", {
+		class: `sim-group ${modifier}`,
+		attrs: {
+			role: "group",
+			"aria-label": title
+		}
+	}, ...children);
+	const consolePanel = h("section", {
+		class: "sim-console tile",
 		attrs: { "aria-label": "Console de simulation" }
-	}, group("Scénario", scenarioHost, h("label", {
+	}, group("Scénario", "is-scenario", scenarioHost, h("label", {
 		class: "column-choice",
 		attrs: { for: "sim-compare" }
-	}, compareBox, "Comparer les deux scénarios")), group("Horizon", presetHost, slider, dateLabel, dateField, dateNote), h("div", { class: "sim-group" }, h("div", { class: "sim-group-head" }, h("h3", { class: "sim-group-title" }, "Produits"), counter, allHost), productsHost));
-	const frame = h("div", { class: "sim-frame" }, scopeHost, h("div", { class: "sim-layout" }, consolePanel, results));
+	}, compareBox, "Comparer les deux scénarios")), group("Produits", "is-products", productsMenu), group("Horizon", "is-horizon", presetHost, slider, dateLabel, dateField, dateNote));
+	const frame = h("div", { class: "sim-frame" }, scopeHost, consolePanel, results);
 	fill$1(host, body);
+	const closeMenu = (event) => {
+		if (productsMenu.open && event.target instanceof Node && !productsMenu.contains(event.target)) productsMenu.open = false;
+	};
+	document.addEventListener("click", closeMenu);
+	productsMenu.addEventListener("keydown", (event) => {
+		if (event.key !== "Escape" || !productsMenu.open) return;
+		event.stopPropagation();
+		productsMenu.open = false;
+		productsMenu.querySelector("summary")?.focus();
+	});
+	/**
+	* The console stays in view under the banner while it holds on two rows of controls at
+	* most; taller (narrow window), it scrolls with the page (docs/produit.md §6 point 2).
+	*/
+	const pinConsole = () => {
+		consolePanel.classList.remove("is-pinned");
+		consolePanel.style.top = `${banner.offsetHeight + 8}px`;
+		consolePanel.classList.toggle("is-pinned", consolePanel.offsetHeight <= PINNED_CONSOLE_MAX_HEIGHT);
+	};
+	window.addEventListener("resize", pinConsole);
 	const toggleProduct = (isin) => {
 		removed = removed.includes(isin) ? removed.filter((entry) => entry !== isin) : [...removed, isin];
 		if (highlight !== null && removed.includes(highlight)) highlight = null;
@@ -38820,14 +38857,15 @@ function mountSimulateur(host, store) {
 			"aria-hidden": "true"
 		}
 	}), line.event);
+	/** One band for the five indicators, none drawn as a card (docs/produit.md §6 point 4, docs/design.md §10). */
 	function indicators(primary, simulations) {
 		return h("section", {
 			class: "section",
 			attrs: { "aria-label": "Indicateurs simulés" }
-		}, h("div", { class: "section-head" }, h("h2", { class: "section-title" }, "Indicateurs simulés")), h("div", { class: "sim-indicators" }, ...simulatedIndicators(primary, simulations).map((model) => h("div", {
-			class: "indicator tile",
+		}, h("div", { class: "section-head" }, h("h2", { class: "section-title" }, "Indicateurs simulés")), h("div", { class: "sim-indicators tile" }, h("div", { class: "sim-indicators-row" }, ...simulatedIndicators(primary, simulations).map((model) => h("div", {
+			class: "sim-indicator",
 			attrs: { "data-indicator": model.id }
-		}, h("p", { class: "indicator-label" }, model.label), ...model.compared === null ? [h("p", { class: "indicator-value" }, model.value)] : [...model.compared.values.map((entry) => h("p", { class: "sim-compared" }, h("span", { class: "sim-compared-name" }, entry.scenario), h("span", { class: "sim-compared-value" }, entry.value))), h("p", { class: "sim-compared sim-gap" }, h("span", { class: "sim-compared-name" }, "Écart"), h("span", { class: "sim-compared-value" }, model.compared.gap))], model.subline === null ? null : h("p", { class: "indicator-subline" }, model.subline)))), ...[withoutRateNote(primary)].map((note) => note === null ? null : h("p", { class: "section-note" }, note)));
+		}, h("p", { class: "sim-indicator-label" }, model.label), ...model.compared === null ? [h("p", { class: "sim-indicator-value" }, model.value)] : [...model.compared.values.map((entry) => h("p", { class: "sim-compared" }, h("span", { class: "sim-compared-name" }, entry.scenario), h("span", { class: "sim-compared-value" }, entry.value))), h("p", { class: "sim-compared sim-gap" }, h("span", { class: "sim-compared-name" }, "Écart"), h("span", { class: "sim-compared-value" }, model.compared.gap))], model.subline === null ? null : h("p", { class: "sim-indicator-subline" }, model.subline))))), ...[withoutRateNote(primary)].map((note) => note === null ? null : h("p", { class: "section-note" }, note)));
 	}
 	function flows(primary, simulations, lines) {
 		const chart = flowChartModel(simulations, mode, highlight, openMonth);
@@ -39073,13 +39111,15 @@ function mountSimulateur(host, store) {
 		}), h("p", { class: "sim-scope-note" }, scopeNote(productChoices(current.reference, removed))), excluded === null ? null : internal(state, () => h("p", { class: "sim-scope-note sim-scope-internal" }, internalMarker(), " ", excluded)));
 		drawConsole(current, activeHorizon);
 		fill$1(results, indicators(primary, simulations), flows(primary, simulations, lines), summary(primary, current.holdings), calendar(primary, lines));
-		const top = banner.offsetHeight + 12;
-		consolePanel.style.top = `${top}px`;
-		consolePanel.style.maxHeight = `calc(100vh - ${top + 16}px)`;
+		pinConsole();
 	}
 	const unsubscribe = store.subscribe(update);
 	update();
-	return unsubscribe;
+	return () => {
+		unsubscribe();
+		document.removeEventListener("click", closeMenu);
+		window.removeEventListener("resize", pinConsole);
+	};
 }
 //#endregion
 //#region src/app/account-search.ts
@@ -39575,16 +39615,11 @@ if (root !== null) mountApp(root, { pages: {
 }
 
 /*
- * Mode présentation (§7) : textes et chiffres agrandis d'environ 15 %, et zones des jauges
- * en un seul gris, celui de « Sans événement » : aucune couleur n'oriente la lecture.
+ * Mode présentation (§7) : textes et chiffres agrandis d'environ 15 %. Les jauges et les
+ * bandeaux d'issue gardent leurs couleurs (produit.md §10).
  */
 :root[data-presentation='true'] {
   --text-scale: 1.15;
-  --issue-recall-zone: var(--issue-no-event-zone);
-  --issue-coupon-zone: var(--issue-no-event-zone);
-  --issue-coupon-not-paid-zone: var(--issue-no-event-zone);
-  --issue-maturity-redeemed-zone: var(--issue-no-event-zone);
-  --issue-maturity-loss-zone: var(--issue-no-event-zone);
 }
 
 /* Impression du PDF client (§11) : textes réduits pour tenir sur la page A4 paysage. */
@@ -41247,8 +41282,7 @@ a {
   font-weight: 600;
 }
 
-.home-tiles,
-.home-tools {
+.home-tiles {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
   gap: var(--gap-tiles);
@@ -41288,16 +41322,16 @@ a {
 }
 
 .fx-table th:nth-child(1) {
-  width: 26%;
+  width: 22%;
 }
 
 .fx-table th:nth-child(2) {
-  width: 12%;
+  width: 20%;
 }
 
 .fx-table th:nth-child(3),
 .fx-table th:nth-child(4) {
-  width: 15%;
+  width: 14%;
 }
 
 .fx-table th:nth-child(5) {
@@ -41313,6 +41347,25 @@ a {
   min-width: 0;
 }
 
+/* « 1 EUR = [ ] USD » : le sens du taux se lit sur la ligne. */
+.fx-rate {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fx-rate .field {
+  flex: 1 1 0;
+  width: 0;
+}
+
+.fx-rate-unit {
+  flex: none;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .row-actions {
   display: flex;
   justify-content: flex-end;
@@ -41321,33 +41374,6 @@ a {
 
 .cell-alert {
   color: var(--loss-ink);
-}
-
-.tool-card {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 20px;
-  color: var(--ink);
-  text-decoration: none;
-}
-
-.tool-card:hover:not([aria-disabled='true']) {
-  border-color: var(--accent);
-}
-
-.tool-card[aria-disabled='true'] {
-  color: var(--ink-3);
-}
-
-.tool-card-title {
-  font-size: var(--fs-17);
-  font-weight: 700;
-}
-
-.tool-card-note {
-  color: var(--ink-3);
-  font-size: var(--fs-13);
 }
 
 /* ── Dashboard ── */
@@ -41523,55 +41549,41 @@ a {
   gap: 8px;
 }
 
-.sim-layout {
-  display: grid;
-  grid-template-columns: 300px minmax(0, 1fr);
-  align-items: start;
-  gap: var(--gap-blocks);
+/*
+ * Console : un bandeau horizontal au-dessus des résultats, jamais une colonne. Le scénario et
+ * les produits sur la première ligne, l'horizon sur la seconde.
+ */
+.sim-console {
+  position: relative;
+  z-index: 11;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  padding: 10px 16px;
 }
 
-.sim-console {
+/* Collante sous le bandeau de simulation tant qu'elle tient sur deux lignes (posé par la page). */
+.sim-console.is-pinned {
   position: sticky;
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-  padding: 18px;
-  overflow-y: auto;
 }
 
 .sim-group {
   display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.sim-group-head {
-  display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
-  gap: 2px 10px;
+  align-items: center;
+  gap: 8px 12px;
+  min-width: 0;
 }
 
-.sim-group-head .btn {
-  height: 30px;
+.sim-group.is-products {
   margin-left: auto;
+  padding-left: 16px;
+  border-left: 1px solid var(--tile-line);
 }
 
-.sim-group-title {
-  font-size: var(--fs-13);
-  font-weight: 700;
-}
-
-.sim-scenario .segmented {
-  display: flex;
-  flex-direction: column;
-  border-radius: 18px;
-}
-
-.sim-scenario .segmented-option {
-  height: 36px;
-  border-radius: 14px;
-  text-align: left;
+.sim-group.is-horizon {
+  flex: 1 1 100%;
 }
 
 .sim-presets {
@@ -41581,7 +41593,7 @@ a {
 }
 
 .sim-presets .btn {
-  height: 34px;
+  height: 36px;
   padding: 0 12px;
 }
 
@@ -41592,21 +41604,26 @@ a {
 }
 
 .sim-slider {
-  width: 100%;
+  flex: 1 1 160px;
+  min-width: 120px;
   accent-color: var(--accent);
 }
 
 .sim-date {
-  font-size: var(--fs-20);
+  font-size: var(--fs-body);
   font-weight: 700;
-  line-height: 1.2;
+  white-space: nowrap;
 }
 
 .sim-date-caption {
-  display: block;
   color: var(--ink-3);
   font-size: var(--fs-12);
   font-weight: 400;
+}
+
+.sim-group.is-horizon .field {
+  width: 150px;
+  height: 36px;
 }
 
 .sim-console-note {
@@ -41614,10 +41631,71 @@ a {
   font-size: var(--fs-12);
 }
 
+.sim-console-note:empty {
+  display: none;
+}
+
+/* Bouton « Produits · n simulés sur m » et sa liste, en panneau flottant. */
+.sim-menu {
+  position: relative;
+}
+
+.sim-menu-button {
+  list-style: none;
+  cursor: pointer;
+}
+
+.sim-menu-button::-webkit-details-marker {
+  display: none;
+}
+
+.sim-menu-count {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.sim-menu-chevron {
+  display: inline-flex;
+}
+
+.sim-menu[open] .sim-menu-chevron {
+  transform: rotate(180deg);
+}
+
+.sim-menu-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 13;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(440px, 80vw);
+  padding: 14px 16px;
+}
+
+.sim-menu-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.sim-menu-head .btn {
+  height: 30px;
+}
+
+.sim-menu-title {
+  font-size: var(--fs-13);
+  font-weight: 700;
+}
+
 .sim-products {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  max-height: min(52vh, 420px);
+  overflow-y: auto;
 }
 
 .sim-product {
@@ -41660,26 +41738,50 @@ a {
   min-width: 0;
 }
 
-/* Trois montants sur une rangée, deux décomptes sur la suivante. */
+/*
+ * Indicateurs simulés : un seul bandeau. Un indicateur n'a ni fond ni bord arrondi propres ;
+ * un fin filet vertical le sépare du précédent.
+ */
 .sim-indicators {
+  padding: 14px 0;
+  overflow: hidden;
+}
+
+.sim-indicators-row {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: var(--gap-tiles);
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  row-gap: 14px;
+  /* Le filet du premier indicateur de chaque ligne sort du cadre. */
+  margin-left: -1px;
 }
 
-.sim-indicators .indicator {
-  grid-column: span 2;
-  padding: 16px;
+.sim-indicator {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 2px 20px;
+  border-left: 1px solid var(--tile-line);
+  border-radius: 0;
+  background: none;
 }
 
-.sim-indicators [data-indicator='products'],
-.sim-indicators [data-indicator='observations'] {
-  grid-column: span 3;
+.sim-indicator-label {
+  color: var(--ink-3);
+  font-size: var(--fs-12);
 }
 
-.sim-indicators .indicator-value {
+.sim-indicator-value {
   font-size: var(--fs-22);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
   white-space: nowrap;
+}
+
+.sim-indicator-subline {
+  color: var(--ink-3);
+  font-size: var(--fs-12);
 }
 
 .sim-compared {
@@ -42085,8 +42187,17 @@ a {
  * PDF client (docs/design.md §11) : fenêtre de paramètres, puis document d'impression.
  * Le document est bâti à part de l'écran (.print-root) ; à l'impression, lui seul est rendu.
  * Les règles de page (format, en-tête, pied) sont écrites au moment d'imprimer (pages/pdf.ts).
- * Aucune couleur ici : uniquement les jetons de tokens.css, en thème clair.
+ * Couleurs : les jetons de tokens.css, en thème clair, et les deux jetons ci-dessous.
  */
+
+/*
+ * Case « Nominal » du PDF : violet pâle uni et son texte.
+ * Seules couleurs écrites hors de tokens.css — à remplacer par la référence de la charte Natixis.
+ */
+:root {
+  --pdf-nominal-bg: #ece4fb;
+  --pdf-nominal-ink: #2b1a4f;
+}
 
 /* ── Fenêtre de paramètres ── */
 .pdf-dialog {
@@ -42157,12 +42268,26 @@ a {
     background: var(--tile);
   }
 
+  /*
+   * Arial dans tout le document (les marges sont réglées par pages/pdf.ts) ; l'écran garde sa police.
+   * Couleurs imprimées telles quelles, que « Graphiques d'arrière-plan » soit coché ou non.
+   */
   .print-root {
     display: block;
     color: var(--ink);
+    font-family: Arial, 'Helvetica Neue', Helvetica, sans-serif;
     font-size: 8pt;
     print-color-adjust: exact;
     -webkit-print-color-adjust: exact;
+  }
+
+  .print-root * {
+    font-family: inherit;
+  }
+
+  /* Copie cachée du logo de pied de page : l'impression attend que l'image soit lue. */
+  .print-preload {
+    display: none;
   }
 
   /* Chaque section commence sur sa page, et porte son titre dans l'en-tête de page. */
@@ -42180,10 +42305,6 @@ a {
 
   .print-observations {
     page: constatations;
-  }
-
-  .print-methodology {
-    page: methodologie;
   }
 
   .print-section {
@@ -42207,16 +42328,6 @@ a {
     display: flex;
     flex-direction: column;
     height: 176mm;
-  }
-
-  .print-cover-logos {
-    display: flex;
-    justify-content: space-between;
-    height: 12mm;
-  }
-
-  .print-logo {
-    height: 12mm;
   }
 
   .print-logo-image {
@@ -42277,16 +42388,42 @@ a {
     object-position: right center;
   }
 
+  /* Logo BPCE : en bas à droite de la page de garde seulement, deux fois plus haut qu'avant (24 mm). */
+  .print-cover-foot {
+    display: flex;
+    flex: none;
+    justify-content: flex-end;
+    height: 24mm;
+  }
+
+  .print-cover-bpce {
+    height: 24mm;
+    max-width: 90mm;
+  }
+
+  .print-cover-bpce .print-logo-image {
+    object-position: right bottom;
+  }
+
   /* ── Indicateurs et graphiques ── */
   .print-root .tile,
   .print-root .hero {
     box-shadow: none;
   }
 
+  /* Case « Nominal » : violet pâle uni, sans dégradé, imprimé même sans « Graphiques d'arrière-plan ». */
   .print-root .hero {
     flex-basis: 360px;
     gap: 10px;
     padding: 18px;
+    background: var(--pdf-nominal-bg);
+    color: var(--pdf-nominal-ink);
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+
+  .print-root .hero * {
+    color: var(--pdf-nominal-ink);
   }
 
   .print-root .indicators {
@@ -42371,9 +42508,24 @@ a {
     padding-right: 8px;
   }
 
-  .print-table .is-numeric,
+  /*
+   * Le tableau tient toujours dans la largeur de la page : un tableau plus large ferait
+   * réduire tout le document par le navigateur. Les montants ne se coupent pas ; les
+   * en-têtes, le titulaire et le type de constatation passent à la ligne.
+   */
+  .print-table {
+    width: 100%;
+  }
+
+  .print-table td.is-numeric,
   .print-table .cell-sub {
     white-space: nowrap;
+  }
+
+  .print-table th.is-numeric,
+  .print-table td.col-account .cell-sub,
+  .print-table td.col-nextEvent .cell-sub {
+    white-space: normal;
   }
 
   .print-table .cell-sub {
@@ -42387,13 +42539,13 @@ a {
   /* Le nom du produit et ses sous-jacents ont la place qu'il leur faut : les lignes restent basses. */
   .print-table td.col-product,
   .print-table th.col-product {
-    min-width: 46mm;
+    min-width: 38mm;
     max-width: none;
   }
 
   .print-table td.col-underlyings,
   .print-table th.col-underlyings {
-    min-width: 26mm;
+    min-width: 22mm;
   }
 
   .print-table td.col-underlyings .cell-line,
@@ -42402,25 +42554,21 @@ a {
     overflow: visible;
   }
 
-  .print-rates {
-    width: auto;
-    min-width: 50%;
-  }
-
-  /* ── Prochaines constatations : neutres, jauge entièrement grise ── */
+  /* ── Prochaines constatations : deux cartes par ligne, jamais coupées, jauge en couleur ── */
   .print-cards {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 10px;
   }
 
   .print-card {
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    padding: 10px 12px;
+    gap: 5px;
+    padding: 9px 12px;
     border: 1px solid var(--tile-line);
     border-radius: 8px;
+    line-height: 1.4;
     break-inside: avoid;
   }
 
@@ -42448,14 +42596,24 @@ a {
     margin: 0;
   }
 
-  .print-root .gauge-level,
-  .print-root .gauge-dot {
-    background: var(--ink-2);
+  /* Deux faits par ligne : libellé, valeur, libellé, valeur. */
+  .print-facts-pairs {
+    grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr);
   }
 
-  /* ── Méthodologie et sources ── */
-  .print-block {
-    break-inside: avoid;
+  /* Zones de la jauge : les couleurs de l'outil, imprimées même sans « Graphiques d'arrière-plan ». */
+  .print-root .gauge-track,
+  .print-root .gauge-zone,
+  .print-root .gauge-level,
+  .print-root .gauge-dot {
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+
+  /* ── « À noter » : mentions générées et taux de change utilisés ── */
+  .print-notes {
+    color: var(--ink-2);
+    font-size: 7.5pt;
   }
 
   .print-list {
