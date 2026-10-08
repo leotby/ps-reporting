@@ -328,6 +328,15 @@ var MONTH_SHORT_LABELS = [
 ];
 /** Shown in place of the indicative outcome when the rules give none (regles-metier.md §6). */
 var OUTCOME_NOT_EVALUATED_LABEL = "Issue non évaluée";
+var NOMINAL_SUBSCRIBED_LABEL = "Nominal souscrit";
+var POTENTIAL_COUPON_LABEL = "Prochain coupon potentiel";
+/** Said on hover: the amount is conditional, it is not a forecast (regles-metier.md §2). */
+var POTENTIAL_COUPON_TIP = "Montant versé à la prochaine constatation si la condition du coupon est remplie. Ce n’est pas une prévision.";
+/** Why a card has no potential coupon: said in words, never a 0. */
+var POTENTIAL_COUPON_GAP_LABELS = {
+	participation: "Produit de participation : pas de coupon",
+	missingNextCoupon: "Prochain coupon non renseigné"
+};
 /** A product whose conditions need no level (fixed rate, credit) has no gauge to show. */
 var NO_REFERENCE_LEVEL_LABEL = "Pas de niveau de référence";
 /** Shown when a new dataset empties the selection of accounts. */
@@ -556,6 +565,25 @@ var LOGO_FILES = {
 	natixis: "natixis.png",
 	bpce: "bpce.png",
 	carres: "carres.png"
+};
+/**
+* Size, in pixels, of the three files of the bank (given by Léo on 08/10/2026). Only their
+* proportions are used: they shape the places reserved for the logos in the PDF, so that
+* the layout is the same with or without the files. The images themselves are never here.
+*/
+var LOGO_PIXELS = {
+	natixis: {
+		width: 339,
+		height: 114
+	},
+	bpce: {
+		width: 960,
+		height: 580
+	},
+	carres: {
+		width: 648,
+		height: 720
+	}
 };
 var LOGOS_MISSING_LABEL = "Logos non trouvés : placez natixis.png, bpce.png et carres.png dans le même dossier que ce fichier.";
 var NAMES = Object.keys(LOGO_FILES);
@@ -1180,6 +1208,45 @@ function nextCouponAmount(product, nominal) {
 */
 function couponsReceivedAmount(product, nominal) {
 	return product.couponsPaidPct === null ? null : amountOf(product.couponsPaidPct, nominal);
+}
+/**
+* A coupon due on a memory product is the coupon of the period plus the coupons in memory
+* (§2.2). Null when it cannot be split without inventing: another family, p not computable
+* (no annual coupon, no period), or a coupon due lower than p — an inconsistency that
+* INCOHERENCE_PROCHAIN_COUPON already reports.
+*/
+function memorySplit(product, duePct) {
+	if (product.family !== "PHOENIX_MEMOIRE") return null;
+	const periodic = periodicCoupon(product);
+	if (periodic === null || duePct < periodic - .01) return null;
+	return {
+		periodic,
+		inMemory: Math.max(0, duePct - periodic)
+	};
+}
+/**
+* Potential next coupon of a product on a selection (§2): what is paid at the next
+* observation if the condition is met — not a forecast. It depends neither on the level of
+* the underlying nor on the indicative outcome. `nominal` is the nominal subscribed, in the
+* currency of the product; `unitsPerEur` its rate, null without one (1 for the euro).
+*/
+function potentialCoupon(product, nominal, unitsPerEur) {
+	const pct = product.nextCouponPct;
+	if (pct === null) return {
+		coupon: null,
+		gap: product.participation ? "participation" : "missingNextCoupon"
+	};
+	const amount = amountOf(pct, nominal);
+	const inMemory = memorySplit(product, pct)?.inMemory ?? null;
+	return {
+		coupon: {
+			pct,
+			amount,
+			amountEur: product.currency === "EUR" || unitsPerEur === null ? null : toEur(amount, unitsPerEur),
+			inMemoryPct: inMemory !== null && inMemory > .01 ? inMemory : null
+		},
+		gap: null
+	};
 }
 function checkLevels(product, report) {
 	if (product.referencePerformance === null || product.direction === null) return;
@@ -34111,6 +34178,8 @@ function buildAgenda(holdings, asOfDate, today) {
 		}
 		const withRate = held.filter((holding) => holding.nominalEur !== null);
 		const { outcome, gap, event } = indicativeOutcome(product, asOfDate);
+		const nominal = held.reduce((total, holding) => total + holding.nominal, 0);
+		const potential = potentialCoupon(product, nominal, held[0].unitsPerEur);
 		entries.push({
 			product,
 			date,
@@ -34120,6 +34189,9 @@ function buildAgenda(holdings, asOfDate, today) {
 			outcomeEvent: event,
 			zones: outcomeZones(product, asOfDate),
 			barriers: agendaBarriers(product),
+			nominal,
+			potentialCoupon: potential.coupon,
+			potentialCouponGap: potential.gap,
 			nominalEur: withRate.length === 0 ? null : withRate.reduce((total, holding) => total + (holding.nominalEur ?? 0), 0),
 			positionsWithoutRate: held.length - withRate.length,
 			accountCount: new Set(held.map((holding) => holding.position.accountId)).size,
@@ -35075,14 +35147,27 @@ function outcomeBand(banner) {
 		attrs: { "data-outcome": banner.outcome }
 	}, drawIcon(OUTCOME_ICON_PATHS[banner.outcome], 16, 2.6), h("span", { class: "outcome-band-label" }, banner.label), banner.detail === null ? null : h("span", { class: "outcome-band-detail" }, banner.detail), h("span", { class: "outcome-band-tag" }, OUTCOME_TAG));
 }
+/** Date block, name of the product, type of observation and countdown. */
+function cardHead(model, mode) {
+	return h("div", { class: "event-card-head" }, h("div", {
+		class: "event-date",
+		attrs: { "aria-hidden": "true" }
+	}, h("span", { class: "event-date-day" }, model.day), h("span", { class: "event-date-month" }, model.month)), h("div", { class: "event-card-title" }, h("h3", { class: "event-card-name" }, model.name), model.holding === null ? null : h("p", { class: "event-card-holding" }, model.holding), h("div", { class: "event-card-pills" }, h("span", { class: "pill" }, model.typeLabel), model.past ? internal(mode, () => h("span", { class: "pill pill-internal" }, internalMarker(), model.countdownLabel)) : h("span", { class: `pill${model.soon ? " is-soon" : ""}` }, model.countdownLabel))));
+}
+/** Reference level and gauge; or that the product has no reference level. */
+function cardGauge(model) {
+	return model.gauge === null ? h("p", { class: "event-card-reference" }, NO_REFERENCE_LEVEL_LABEL) : h("div", { class: "event-card-gauge" }, model.reference === null ? null : h("p", { class: "event-card-reference" }, model.reference), gauge(model.gauge));
+}
+/** One chip per barrier: label, level, distance, mention. */
+function cardChips(model) {
+	return h("div", { class: `barrier-chips${model.chips.length === 2 ? " is-pair" : ""}` }, ...model.chips.map((chip) => h("div", { class: "barrier-chip" }, h("span", { class: "barrier-chip-label" }, chip.label), h("span", { class: "barrier-chip-level" }, chip.level), chip.distance === null ? null : h("span", { class: "barrier-chip-distance" }, chip.distance), chip.note === null ? null : h("span", { class: "barrier-chip-note" }, chip.note))));
+}
+/** Card of the Dashboard: everything stacked, two cards per row (docs/design.md §6.3). */
 function eventCard(model, mode) {
 	return h("article", {
 		class: "event-card tile",
 		attrs: { "aria-label": `${model.name}, ${model.typeLabel} du ${model.date}` }
-	}, outcomeBand(model.banner), h("div", { class: "event-card-body" }, h("div", { class: "event-card-head" }, h("div", {
-		class: "event-date",
-		attrs: { "aria-hidden": "true" }
-	}, h("span", { class: "event-date-day" }, model.day), h("span", { class: "event-date-month" }, model.month)), h("div", { class: "event-card-title" }, h("h3", { class: "event-card-name" }, model.name), model.holding === null ? null : h("p", { class: "event-card-holding" }, model.holding), h("div", { class: "event-card-pills" }, h("span", { class: "pill" }, model.typeLabel), model.past ? internal(mode, () => h("span", { class: "pill pill-internal" }, internalMarker(), model.countdownLabel)) : h("span", { class: `pill${model.soon ? " is-soon" : ""}` }, model.countdownLabel)))), model.gauge === null ? h("p", { class: "event-card-reference" }, NO_REFERENCE_LEVEL_LABEL) : h("div", { class: "event-card-gauge" }, model.reference === null ? null : h("p", { class: "event-card-reference" }, model.reference), gauge(model.gauge)), h("div", { class: `barrier-chips${model.chips.length === 2 ? " is-pair" : ""}` }, ...model.chips.map((chip) => h("div", { class: "barrier-chip" }, h("span", { class: "barrier-chip-label" }, chip.label), h("span", { class: "barrier-chip-level" }, chip.level), chip.distance === null ? null : h("span", { class: "barrier-chip-distance" }, chip.distance), chip.note === null ? null : h("span", { class: "barrier-chip-note" }, chip.note))))));
+	}, outcomeBand(model.banner), h("div", { class: "event-card-body" }, cardHead(model, mode), cardGauge(model), cardChips(model)));
 }
 /** Two cards per row; beyond five rows the grid scrolls in the page (docs/design.md §6.3). */
 function eventGrid(models, mode, scrolling) {
@@ -35096,6 +35181,41 @@ function eventGrid(models, mode, scrolling) {
 		} : {}
 	}, ...models.map((model) => eventCard(model, mode)));
 }
+/** Nominal subscribed and potential next coupon: not internal, shown in presentation mode too. */
+function cardFigures$1(figures) {
+	return h("div", { class: "event-figures" }, h("div", {
+		class: "event-figure",
+		attrs: { "data-figure": "nominal" }
+	}, h("span", { class: "event-figure-label" }, figures.nominalLabel), h("span", { class: "event-figure-value" }, figures.nominal)), h("div", {
+		class: "event-figure",
+		attrs: { "data-figure": "coupon" }
+	}, withTip(h("span", { class: "event-figure-label" }, figures.couponLabel), figures.couponTip), h("span", { class: "event-figure-value" }, figures.coupon), ...figures.couponLines.map((line) => h("span", { class: "event-figure-line" }, line))));
+}
+/**
+* Card of the Analyse PS: one per row, on the whole width (docs/design.md §6.3). Under the
+* outcome band, three columns: the identity of the product, its gauge, its figures.
+*/
+function eventRow(model, mode) {
+	return h("article", {
+		class: "event-card event-row tile",
+		attrs: {
+			"aria-label": `${model.name}, ${model.typeLabel} du ${model.date}`,
+			"data-isin": model.isin
+		}
+	}, outcomeBand(model.banner), h("div", { class: "event-row-body" }, cardHead(model, mode), cardGauge(model), h("div", { class: "event-row-figures" }, cardChips(model), model.figures === null ? null : cardFigures$1(model.figures))));
+}
+/** One card per row; beyond eight cards the list scrolls in the page (docs/design.md §6.3). */
+function eventList(models, mode, scrolling) {
+	return h("div", {
+		class: `event-list${scrolling ? " is-scrolling scroll" : ""}`,
+		attrs: scrolling ? {
+			tabindex: 0,
+			role: "group",
+			"aria-label": "Prochains événements",
+			[SCROLL_KEY]: "events"
+		} : {}
+	}, ...models.map((model) => eventRow(model, mode)));
+}
 //#endregion
 //#region src/labels/outcome.ts
 /** Null when the outcome needs no detail. */
@@ -35105,7 +35225,12 @@ function outcomeDetailLabel(outcome, event, product) {
 		case "recall":
 		case "maturityRedeemed": return event.couponPaidPct > 0 ? `nominal + coupon de ${coupon(event.couponPaidPct)}` : "nominal remboursé";
 		case "coupon": return event.callable ? `${coupon(event.couponPaidPct)} versé, pas de rappel` : `${coupon(event.couponPaidPct)} versé`;
-		case "couponNotPaid": return product.family === "PHOENIX_MEMOIRE" ? `${coupon(event.couponDuePct)} mis en mémoire` : `${coupon(event.couponDuePct)} non versé`;
+		case "couponNotPaid": {
+			if (product.family !== "PHOENIX_MEMOIRE") return `${coupon(event.couponDuePct)} non versé`;
+			const total = `total en mémoire ${coupon(event.couponDuePct)}`;
+			const split = memorySplit(product, event.couponDuePct);
+			return split === null ? total : `${coupon(split.periodic)} mis en mémoire · ${total}`;
+		}
 		case "noEvent":
 			if (!event.callable) return null;
 			return product.direction === "BEARISH" ? "barrière de rappel non atteinte" : "sous la barrière de rappel";
@@ -35278,6 +35403,26 @@ function holdingLine(entry) {
 	if (entry.positionsWithoutRate > 0) parts.push(`hors ${formatCount(entry.positionsWithoutRate)} position${entry.positionsWithoutRate > 1 ? "s" : ""} sans taux de change`);
 	return parts.join(" · ");
 }
+/** Nominal subscribed and potential next coupon, as the rules give them (regles-metier.md §2 and §2.2). */
+function cardFigures(entry) {
+	const { currency } = entry.product;
+	const coupon = entry.potentialCoupon;
+	const lines = [];
+	if (coupon === null) lines.push(POTENTIAL_COUPON_GAP_LABELS[entry.potentialCouponGap ?? "missingNextCoupon"]);
+	else {
+		lines.push(`${formatPercent(coupon.pct, 2)} du nominal`);
+		if (coupon.amountEur !== null) lines.push(`soit ${formatAmount(coupon.amountEur, "EUR")}`);
+		if (coupon.inMemoryPct !== null) lines.push(`dont ${formatPercent(coupon.inMemoryPct, 2)} en mémoire`);
+	}
+	return {
+		nominalLabel: NOMINAL_SUBSCRIBED_LABEL,
+		nominal: formatAmount(entry.nominal, currency),
+		couponLabel: POTENTIAL_COUPON_LABEL,
+		couponTip: POTENTIAL_COUPON_TIP,
+		coupon: coupon === null ? "—" : formatAmount(coupon.amount, currency),
+		couponLines: lines
+	};
+}
 function eventCardModel(entry, scale, today, variant) {
 	const { product, date, type } = entry;
 	const { day, month } = dateParts(date);
@@ -35300,6 +35445,7 @@ function eventCardModel(entry, scale, today, variant) {
 		soon: date >= today && date <= addBusinessDays(today, 5),
 		past: entry.countdown.kind === "past",
 		holding: variant === "dashboard" ? holdingLine(entry) : null,
+		figures: variant === "analyse" ? cardFigures(entry) : null,
 		banner: banner(entry),
 		reference: referenceName(entry),
 		gauge: gauge.cursor === null && gauge.ticks.length === 0 ? null : gauge,
@@ -35995,6 +36141,66 @@ function undatedNote(products) {
 	return products.length === 1 ? `1 produit sans prochaine constatation, absent de cette liste : ${names}.` : `${formatCount(products.length)} produits sans prochaine constatation, absents de cette liste : ${names}.`;
 }
 //#endregion
+//#region src/app/pages/pdf-layout.ts
+/** A4 landscape. */
+var PAGE = {
+	width: 297,
+	height: 210
+};
+/** Inner pages: the same useful height as before the logo was raised (178 mm), moved up by 3 mm. */
+var PAGE_MARGINS = {
+	top: 13,
+	side: 12,
+	bottom: 19
+};
+/** The cover goes lower than the other pages: its two logos stand in the footer. */
+var COVER_MARGINS = {
+	top: 16,
+	side: 12,
+	bottom: 7
+};
+/** Bottom edge of the Natixis logo on every page, and of the BPCE logo on the cover, from the bottom of the page. */
+var LOGO_BOTTOM_FROM_EDGE = 7.5;
+var NATIXIS_HEIGHT = 10;
+var BPCE_HEIGHT = 36;
+/** Width of the squares of the cover: 45 % of the printed width, as it always was. */
+var CARRES_WIDTH = 122.85;
+var ratio = (name) => LOGO_PIXELS[name].width / LOGO_PIXELS[name].height;
+/** The place reserved for each logo: the exact proportions of its file (docs/produit.md §9). */
+var LOGO_PLACES = {
+	natixis: {
+		width: NATIXIS_HEIGHT * ratio("natixis"),
+		height: NATIXIS_HEIGHT
+	},
+	bpce: {
+		width: BPCE_HEIGHT * ratio("bpce"),
+		height: BPCE_HEIGHT
+	},
+	carres: {
+		width: CARRES_WIDTH,
+		height: CARRES_WIDTH / ratio("carres")
+	}
+};
+/** Top of the squares, from the top of the cover: where they have always been (24,5 mm from the top of the page). */
+var CARRES_TOP = 8.5;
+/** Height of the cover: its page area, less half a millimetre so that it never spills on a second page. */
+var COVER_HEIGHT = PAGE.height - COVER_MARGINS.top - COVER_MARGINS.bottom - .5;
+/** An image contained in its place, never distorted: null without the image. */
+function fitIn(place, image) {
+	if (image === null || image.width <= 0 || image.height <= 0) return null;
+	const scale = Math.min(place.width / image.width, place.height / image.height);
+	return {
+		width: image.width * scale,
+		height: image.height * scale
+	};
+}
+var PX_PER_MM = 96 / 25.4;
+/** Pixels of the image for one CSS pixel, so that it is printed at the given height (`image-set`). */
+function imageDensity(image, printed) {
+	return image.height / (printed.height * PX_PER_MM);
+}
+var mm = (value) => `${Math.round(value * 1e3) / 1e3}mm`;
+//#endregion
 //#region src/app/pages/pdf-model.ts
 var CONTACT_ROLES = ["Gérant", "Banquier privé"];
 var PDF_TITLE = "Reporting Produits Structurés";
@@ -36123,8 +36329,24 @@ function pdfDocumentModel(state, parameters, today, texts) {
 }
 //#endregion
 //#region src/app/pages/pdf.ts
-/** A logo that is there, or an empty place: neither dashes nor a « logo » text (page a). */
-var logoOrNothing = (name, className) => h("div", { class: className }, logoImage(name, "", "print-logo-image"));
+/**
+* The place reserved for a logo, at the proportions of its file, with the image inside when
+* it is there: neither dashes nor a « logo » text (page a). The place has its size whether
+* the file is found or not, and the image has an explicit size: the layout never depends on it.
+*/
+function logoPlace(name, className) {
+	const place = LOGO_PLACES[name];
+	const image = logoImage(name, "", "print-logo-image");
+	const printed = fitIn(place, logoSize(name));
+	if (image !== null && printed !== null) image.setAttribute("style", `width: ${mm(printed.width)}; height: ${mm(printed.height)}`);
+	return h("div", {
+		class: `print-place ${className}`,
+		attrs: {
+			"data-logo": name,
+			style: `width: ${mm(place.width)}; height: ${mm(place.height)}`
+		}
+	}, image);
+}
 /**
 * Cover: the text on the left, the squares on the right and, at the bottom, the two logos
 * standing on the same line: Natixis on the left, exactly where the footer of the other
@@ -36132,10 +36354,18 @@ var logoOrNothing = (name, className) => h("div", { class: className }, logoImag
 */
 function cover(model) {
 	const { cover: page } = model;
-	const natixis = logoImage("natixis", "", "print-cover-natixis-image");
-	const printed = footerLogoSize(logoSize("natixis"));
-	if (natixis !== null && printed !== null) natixis.setAttribute("style", `width: ${printed.width.toFixed(3)}mm; height: ${printed.height.toFixed(3)}mm`);
-	return h("section", { class: "print-cover" }, h("div", { class: "print-cover-body" }, h("div", { class: "print-cover-text" }, h("h1", { class: "print-cover-title" }, page.title), h("p", { class: "print-cover-client" }, page.clientName), h("ul", { class: "print-cover-accounts" }, ...page.accounts.map((account) => h("li", null, account))), h("p", { class: "print-cover-line" }, page.asOf), h("p", { class: "print-cover-line" }, page.contact)), logoOrNothing("carres", "print-cover-graphic")), h("div", { class: "print-cover-foot" }, h("div", { class: "print-cover-natixis" }, natixis), h("p", { class: "print-cover-mention" }, model.generalMention), logoOrNothing("bpce", "print-cover-bpce")));
+	const squares = logoPlace("carres", "print-cover-graphic");
+	squares.style.marginTop = mm(CARRES_TOP);
+	return h("section", {
+		class: "print-cover",
+		attrs: { style: `height: ${mm(COVER_HEIGHT)}` }
+	}, h("div", { class: "print-cover-body" }, h("div", { class: "print-cover-text" }, h("h1", { class: "print-cover-title" }, page.title), h("p", { class: "print-cover-client" }, page.clientName), h("ul", { class: "print-cover-accounts" }, ...page.accounts.map((account) => h("li", null, account))), h("p", { class: "print-cover-line" }, page.asOf), h("p", { class: "print-cover-line" }, page.contact)), squares), h("div", {
+		class: "print-cover-foot",
+		attrs: { style: `height: ${mm(LOGO_PLACES.bpce.height)}` }
+	}, h("div", {
+		class: "print-cover-natixis",
+		attrs: { style: `width: ${mm(36)}` }
+	}, logoPlace("natixis", "is-bottom-left")), h("p", { class: "print-cover-mention" }, model.generalMention), logoPlace("bpce", "is-bottom-right")));
 }
 function indicators(model) {
 	return h("section", { class: "print-section print-indicators" }, h("div", { class: "summary-row" }, summaryTile(model.summary), indicatorTiles(model.indicators)), h("p", { class: "print-disclaimer" }, model.disclaimer), h("div", { class: "breakdowns" }, ...model.breakdowns.map((tile) => breakdownTile(tile))), h("div", { class: "print-box" }, h("h2", { class: "print-box-title" }, RISK_BOX_TITLE), ...model.riskText.map((paragraph) => h("p", null, paragraph))), model.notes.length === 0 ? null : h("div", { class: "print-box print-notes" }, h("h2", { class: "print-box-title" }, NOTES_TITLE), h("ul", { class: "print-list" }, ...model.notes.map((note) => h("li", null, note)))));
@@ -36161,36 +36391,15 @@ var quoted = (text) => `"${text.replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"`;
 /** Arial everywhere in the document, margins included (docs/design.md §11); the screen keeps its own font. */
 var PDF_FONT_FAMILY = "Arial, \"Helvetica Neue\", Helvetica, sans-serif";
 /**
-* Footer logo (docs/design.md §11): 10 mm high, 42,5 mm wide at most, in a place of 46 mm at
-* the bottom left of every page; its bottom stands 4,5 mm above the edge of the page.
-*/
-var FOOTER_LOGO_HEIGHT_MM = 10;
-var FOOTER_LOGO_MAX_WIDTH_MM = 42.5;
-var FOOTER_LOGO_BOX_MM = 46;
-var FOOTER_LOGO_FROM_EDGE_MM = 4.5;
-/** Margins of the pages. The cover goes lower: its two logos stand in the footer, on the line of the footer logo. */
-var PAGE_MARGINS = "16mm 12mm 16mm 12mm";
-var COVER_BOTTOM_MARGIN_MM = 4;
-var PX_PER_MM = 96 / 25.4;
-/** Printed size of the footer logo, in millimetres; null without the image. */
-function footerLogoSize(size) {
-	if (size === null || size.width <= 0 || size.height <= 0) return null;
-	const scale = Math.min(FOOTER_LOGO_HEIGHT_MM / size.height, FOOTER_LOGO_MAX_WIDTH_MM / size.width);
-	return {
-		width: size.width * scale,
-		height: size.height * scale
-	};
-}
-/**
 * The Natixis logo as the content of its margin box, never as a background: it is printed
 * whatever the « background graphics » setting of the print window. `image-set` gives the
-* image its printed size: so many of its own pixels for one CSS pixel.
+* image its printed size: so many of its own pixels for one CSS pixel. Without the image,
+* the place stays empty.
 */
 function footerLogo(size) {
-	const printed = footerLogoSize(size);
+	const printed = fitIn(LOGO_PLACES.natixis, size);
 	if (size === null || printed === null) return "\"\"";
-	const density = size.height / (printed.height * PX_PER_MM);
-	return `image-set(url(${LOGO_FILES.natixis}) ${density.toFixed(4)}x)`;
+	return `image-set(url(${LOGO_FILES.natixis}) ${imageDensity(size, printed).toFixed(4)}x)`;
 }
 /**
 * Rules of the printed pages, written when the document is printed: A4 landscape, the
@@ -36203,14 +36412,14 @@ function pageRules(model) {
 	const font = (weight, size) => `font: ${weight} ${size} ${PDF_FONT_FAMILY};`;
 	const header = (name, title) => `@page ${name} { @top-left { content: ${quoted(title)}; ${font(600, "9pt")} color: ${color("--ink-2")}; } }`;
 	return [
-		`@page { size: A4 landscape; margin: ${PAGE_MARGINS};`,
+		`@page { size: A4 landscape; margin: ${PAGE_MARGINS.top}mm ${PAGE_MARGINS.side}mm ${PAGE_MARGINS.bottom}mm ${PAGE_MARGINS.side}mm;`,
 		`  @top-right { content: ${quoted(model.nominalLabel)}; ${font(600, "9pt")} color: ${color("--ink-2")}; }`,
 		model.demo ? `  @top-center { content: ${quoted(DEMO_MENTION)}; ${font(700, "9pt")} color: ${color("--ink-2")}; }` : "",
-		`  @bottom-left { content: ${footerLogo(logoSize("natixis"))}; width: ${FOOTER_LOGO_BOX_MM}mm; padding-bottom: ${FOOTER_LOGO_FROM_EDGE_MM}mm; font-size: 0; line-height: 0; text-align: left; vertical-align: bottom; }`,
+		`  @bottom-left { content: ${footerLogo(logoSize("natixis"))}; width: 36mm; padding-bottom: ${LOGO_BOTTOM_FROM_EDGE}mm; font-size: 0; line-height: 0; text-align: left; vertical-align: bottom; }`,
 		`  @bottom-center { content: ${quoted(model.generalMention)}; ${font(400, "6pt")} color: ${color("--ink-3")}; text-align: left; vertical-align: middle; }`,
-		`  @bottom-right { content: counter(page) " / " counter(pages); width: ${FOOTER_LOGO_BOX_MM}mm; ${font(600, "8pt")} color: ${color("--ink-2")}; text-align: right; vertical-align: middle; }`,
+		`  @bottom-right { content: counter(page) " / " counter(pages); width: 36mm; ${font(600, "8pt")} color: ${color("--ink-2")}; text-align: right; vertical-align: middle; }`,
 		`}`,
-		`@page garde { margin-bottom: ${COVER_BOTTOM_MARGIN_MM}mm; @top-right { content: none; } @top-center { content: ${model.demo ? quoted(DEMO_MENTION) : "none"}; } @bottom-left { content: none; } @bottom-center { content: none; } @bottom-right { content: none; } }`,
+		`@page garde { margin: ${COVER_MARGINS.top}mm ${COVER_MARGINS.side}mm ${COVER_MARGINS.bottom}mm ${COVER_MARGINS.side}mm; @top-right { content: none; } @top-center { content: ${model.demo ? quoted(DEMO_MENTION) : "none"}; } @bottom-left { content: none; } @bottom-center { content: none; } @bottom-right { content: none; } }`,
 		header("indicateurs", PDF_SECTIONS.indicators),
 		header("inventaire", PDF_SECTIONS.inventory),
 		header("constatations", PDF_SECTIONS.observations)
@@ -36332,7 +36541,7 @@ function openPdfDialog(store) {
 //#endregion
 //#region src/app/pages/analyse.ts
 /** Rows of two cards beyond which the list of events scrolls (docs/design.md §6.3). */
-var SCROLL_BEYOND_CARDS = 10;
+var SCROLL_BEYOND_CARDS = 8;
 function mountAnalyse(host, store) {
 	let base = "amount";
 	let view = INITIAL_INVENTORY_VIEW;
@@ -36390,7 +36599,7 @@ function mountAnalyse(host, store) {
 		}), h("section", {
 			class: "section",
 			attrs: { "aria-label": "Prochains événements" }
-		}, h("div", { class: "section-head" }, h("h2", { class: "section-title" }, "Prochains événements"), h("span", { class: "section-note" }, agendaNote(agenda.entries.length))), agenda.entries.length === 0 ? h("p", { class: "page-help" }, "Aucune constatation à venir pour ces comptes.") : eventGrid(agenda.entries.map((entry) => eventCardModel(entry, scale, today(), "analyse")), state, agenda.entries.length > SCROLL_BEYOND_CARDS), undated === null ? null : h("p", { class: "section-note" }, undated)), inventorySection(inventoryModel(rows, view, accounts.length > 1), view, {
+		}, h("div", { class: "section-head" }, h("h2", { class: "section-title" }, "Prochains événements"), h("span", { class: "section-note" }, agendaNote(agenda.entries.length))), agenda.entries.length === 0 ? h("p", { class: "page-help" }, "Aucune constatation à venir pour ces comptes.") : eventList(agenda.entries.map((entry) => eventCardModel(entry, scale, today(), "analyse")), state, agenda.entries.length > SCROLL_BEYOND_CARDS), undated === null ? null : h("p", { class: "section-note" }, undated)), inventorySection(inventoryModel(rows, view, accounts.length > 1), view, {
 			onView: setView,
 			onExport: exportInventory
 		}));
@@ -40362,6 +40571,95 @@ a {
   }
 }
 
+/*
+ * Analyse PS : une carte par ligne, sur toute la largeur. Sous le bandeau d'issue, trois
+ * colonnes : identité du produit, jauge, chiffres.
+ */
+.event-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-tiles);
+}
+
+/* Au-delà de huit cartes, la liste défile dans la page : la hauteur de cinq cartes de l'ancienne grille. */
+.event-list.is-scrolling {
+  max-height: calc(5 * 300px * var(--text-scale) + 4 * var(--gap-tiles) + 4px);
+  overflow-y: auto;
+  padding: 2px 8px 2px 2px;
+}
+
+.event-row {
+  flex: none;
+  min-height: 0;
+}
+
+.event-row-body {
+  display: grid;
+  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.3fr) minmax(0, 1.2fr);
+  align-items: center;
+  gap: 16px 28px;
+  padding: 16px 20px 18px;
+}
+
+.event-row-figures {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.event-row .barrier-chips {
+  margin-top: 0;
+}
+
+/* La mention interne d'une constatation passée est longue : sur plusieurs lignes, c'est un encadré, pas une pastille. */
+.event-row .pill-internal {
+  align-items: flex-start;
+  padding: 4px 10px;
+  border-radius: var(--radius-small);
+  line-height: 1.3;
+}
+
+.event-figures {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: 8px;
+}
+
+.event-figure {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-small);
+  background: var(--chip);
+}
+
+.event-figure-label {
+  align-self: flex-start;
+  color: var(--ink-3);
+  font-size: var(--fs-11);
+}
+
+.event-figure-value {
+  font-size: var(--fs-15);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.event-figure-line {
+  color: var(--ink-2);
+  font-size: var(--fs-12);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 1100px) {
+  .event-row-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 /* ── Tuile de synthèse et indicateurs (§6.1) ── */
 .summary-row {
   display: flex;
@@ -42301,18 +42599,13 @@ a {
   }
 
   /* ── Page de garde ── */
-  /* La page de garde descend jusqu'à 4 mm du bord (pages/pdf.ts) : 190 mm de haut, moins une marge de sécurité. */
+  /*
+   * Les dimensions de la page de garde et des emplacements des logos sont posées par
+   * pages/pdf.ts, d'après pages/pdf-layout.ts : ici, seulement la disposition.
+   */
   .print-cover {
     display: flex;
     flex-direction: column;
-    height: 189.5mm;
-  }
-
-  .print-logo-image {
-    display: block;
-    max-width: 100%;
-    height: 100%;
-    object-fit: contain;
   }
 
   .print-cover-body {
@@ -42331,8 +42624,9 @@ a {
     min-width: 0;
   }
 
+  /* Plus grand que le nom du client, sans dominer la page. */
   .print-cover-title {
-    font-size: 30pt;
+    font-size: 24pt;
     font-weight: 700;
     letter-spacing: -0.02em;
     line-height: 1.1;
@@ -42355,36 +42649,49 @@ a {
     font-size: 11pt;
   }
 
-  .print-cover-graphic {
-    flex: 0 1 45%;
-    min-width: 0;
-    padding: 6mm 0;
+  /*
+   * Emplacement réservé à un logo : aux proportions de son fichier, que le fichier soit là
+   * ou non. L'image y a une taille explicite ; elle n'est jamais déformée.
+   */
+  .print-place {
+    display: flex;
+    flex: none;
+    align-items: flex-end;
+    justify-content: flex-start;
   }
 
-  .print-cover-graphic .print-logo-image {
-    width: 100%;
-    object-position: right center;
+  .print-place.is-bottom-right {
+    justify-content: flex-end;
+  }
+
+  .print-logo-image {
+    display: block;
+    flex: none;
+    object-fit: contain;
+  }
+
+  /* Les carrés : en haut à droite du corps de la page, à la place qu'ils ont toujours eue. */
+  .print-cover-graphic {
+    align-self: flex-start;
+    align-items: center;
+    justify-content: flex-end;
   }
 
   /*
    * Bas de la page de garde : les deux logos posés sur la même ligne, la mention entre eux.
    * Natixis à gauche, à la place et à la taille qu'il a dans le pied des autres pages ;
-   * BPCE à droite, 36 mm de haut, sur cette page seulement.
+   * BPCE à droite, sur cette page seulement.
    */
   .print-cover-foot {
     display: flex;
     flex: none;
     align-items: flex-end;
-    height: 36mm;
   }
 
   .print-cover-natixis {
+    display: flex;
     flex: none;
-    width: 46mm;
-  }
-
-  .print-cover-natixis-image {
-    display: block;
+    align-items: flex-end;
   }
 
   .print-cover-mention {
@@ -42395,16 +42702,6 @@ a {
     color: var(--ink-3);
     font-size: 6pt;
     line-height: 1.3;
-  }
-
-  .print-cover-bpce {
-    flex: none;
-    height: 36mm;
-    max-width: 135mm;
-  }
-
-  .print-cover-bpce .print-logo-image {
-    object-position: right bottom;
   }
 
   /* ── Indicateurs et graphiques ── */
