@@ -35995,50 +35995,12 @@ function undatedNote(products) {
 	return products.length === 1 ? `1 produit sans prochaine constatation, absent de cette liste : ${names}.` : `${formatCount(products.length)} produits sans prochaine constatation, absents de cette liste : ${names}.`;
 }
 //#endregion
-//#region src/quality/disclaimers.ts
-function buildDisclaimers(positions, asOfDate, fxRates) {
-	const disclaimers = [];
-	const count = (predicate) => positions.filter(predicate).length;
-	const outsideFeefty = count((position) => position.status === "EXCLUE_HORS_FEEFTY");
-	if (outsideFeefty > 0) disclaimers.push({
-		code: "PRODUIT_HORS_FEEFTY",
-		count: outsideFeefty,
-		text: `${outsideFeefty} position(s) ne figurent pas dans cette analyse : produit(s) absent(s) de la base produits au ${formatDateFr(asOfDate)}.`
-	});
-	const withoutNominal = count((position) => position.status === "EXCLUE_NOMINAL_MANQUANT");
-	if (withoutNominal > 0) disclaimers.push({
-		code: "NOMINAL_MANQUANT",
-		count: withoutNominal,
-		text: `Le nominal de ${withoutNominal} position(s) n'est pas renseigné ; elles ne sont pas incluses dans cette analyse.`
-	});
-	const included = positions.filter((position) => position.status === "INCLUSE");
-	const currenciesWithRate = new Set(fxRates.map((rate) => rate.currency.toUpperCase()));
-	const withoutRate = /* @__PURE__ */ new Map();
-	for (const position of included) {
-		const currency = position.currency;
-		if (currency === null || currency === "EUR" || currenciesWithRate.has(currency)) continue;
-		withoutRate.set(currency, (withoutRate.get(currency) ?? 0) + 1);
-	}
-	for (const [currency, positionCount] of [...withoutRate].sort(([a], [b]) => a.localeCompare(b))) disclaimers.push({
-		code: "TAUX_MANQUANT",
-		count: positionCount,
-		text: `Les positions en ${currency} sont exclues des montants en euros, faute de taux de change.`
-	});
-	const withoutValuation = included.filter((position) => position.marketValueEur === null).length;
-	if (withoutValuation > 0) disclaimers.push({
-		code: "VALORISATION_MANQUANTE",
-		count: withoutValuation,
-		text: `La valorisation de ${withoutValuation} position(s) n'est pas disponible.`
-	});
-	return disclaimers;
-}
-//#endregion
 //#region src/app/pages/pdf-model.ts
 var CONTACT_ROLES = ["Gérant", "Banquier privé"];
 var PDF_TITLE = "Reporting Produits Structurés";
 var DEMO_MENTION = "Données fictives";
 var RISK_BOX_TITLE = "Suivi des risques";
-/** Small block at the bottom of the indicators page: generated mentions and exchange rates used. */
+/** Small block at the bottom of the indicators page: the exchange rates used, and nothing else. */
 var NOTES_TITLE = "À noter";
 /** Titles of the sections, written at the top of each of their pages. */
 var PDF_SECTIONS = {
@@ -36155,8 +36117,7 @@ function pdfDocumentModel(state, parameters, today, texts) {
 		riskText: (texts.risk ?? "[texte V1 à fournir]").split(/\n\s*\n/).map((paragraph) => paragraph.replace(/\s+/g, " ").trim()),
 		inventory: inventoryModel(buildInventory(holdings), INITIAL_INVENTORY_VIEW, accounts.length > 1),
 		observations,
-		undated: undatedNote(agenda.undated),
-		notes: [...buildDisclaimers(selectedPositions(scope), asOfDate, dataset.context.fxRates).map((disclaimer) => disclaimer.text), ...rates.map(rateNote)],
+		notes: rates.map(rateNote),
 		generalMention: (texts.general ?? "[texte V1 à fournir]").replace(/\s+/g, " ").trim()
 	};
 }
@@ -36165,12 +36126,16 @@ function pdfDocumentModel(state, parameters, today, texts) {
 /** A logo that is there, or an empty place: neither dashes nor a « logo » text (page a). */
 var logoOrNothing = (name, className) => h("div", { class: className }, logoImage(name, "", "print-logo-image"));
 /**
-* Cover: the text on the left, the squares on the right, the BPCE logo at the bottom right.
-* The Natixis logo is at the bottom left, in the footer shared by every page (pageRules).
+* Cover: the text on the left, the squares on the right and, at the bottom, the two logos
+* standing on the same line: Natixis on the left, exactly where the footer of the other
+* pages draws it, the general mention, and BPCE on the right, on this page only.
 */
 function cover(model) {
 	const { cover: page } = model;
-	return h("section", { class: "print-cover" }, h("div", { class: "print-cover-body" }, h("div", { class: "print-cover-text" }, h("h1", { class: "print-cover-title" }, page.title), h("p", { class: "print-cover-client" }, page.clientName), h("ul", { class: "print-cover-accounts" }, ...page.accounts.map((account) => h("li", null, account))), h("p", { class: "print-cover-line" }, page.asOf), h("p", { class: "print-cover-line" }, page.contact)), logoOrNothing("carres", "print-cover-graphic")), h("div", { class: "print-cover-foot" }, logoOrNothing("bpce", "print-cover-bpce")));
+	const natixis = logoImage("natixis", "", "print-cover-natixis-image");
+	const printed = footerLogoSize(logoSize("natixis"));
+	if (natixis !== null && printed !== null) natixis.setAttribute("style", `width: ${printed.width.toFixed(3)}mm; height: ${printed.height.toFixed(3)}mm`);
+	return h("section", { class: "print-cover" }, h("div", { class: "print-cover-body" }, h("div", { class: "print-cover-text" }, h("h1", { class: "print-cover-title" }, page.title), h("p", { class: "print-cover-client" }, page.clientName), h("ul", { class: "print-cover-accounts" }, ...page.accounts.map((account) => h("li", null, account))), h("p", { class: "print-cover-line" }, page.asOf), h("p", { class: "print-cover-line" }, page.contact)), logoOrNothing("carres", "print-cover-graphic")), h("div", { class: "print-cover-foot" }, h("div", { class: "print-cover-natixis" }, natixis), h("p", { class: "print-cover-mention" }, model.generalMention), logoOrNothing("bpce", "print-cover-bpce")));
 }
 function indicators(model) {
 	return h("section", { class: "print-section print-indicators" }, h("div", { class: "summary-row" }, summaryTile(model.summary), indicatorTiles(model.indicators)), h("p", { class: "print-disclaimer" }, model.disclaimer), h("div", { class: "breakdowns" }, ...model.breakdowns.map((tile) => breakdownTile(tile))), h("div", { class: "print-box" }, h("h2", { class: "print-box-title" }, RISK_BOX_TITLE), ...model.riskText.map((paragraph) => h("p", null, paragraph))), model.notes.length === 0 ? null : h("div", { class: "print-box print-notes" }, h("h2", { class: "print-box-title" }, NOTES_TITLE), h("ul", { class: "print-list" }, ...model.notes.map((note) => h("li", null, note)))));
@@ -36187,27 +36152,44 @@ function observations(model) {
 		barrier.level,
 		barrier.distance,
 		barrier.note
-	].filter((part) => part !== null).join(" · "))]))))), model.undated === null ? null : h("p", { class: "print-disclaimer" }, model.undated));
+	].filter((part) => part !== null).join(" · "))]))))));
 }
 function printRoot(model) {
-	return h("div", { class: "print-root" }, cover(model), indicators(model), inventory(model), observations(model), logoImage("natixis", "", "print-preload"));
+	return h("div", { class: "print-root" }, cover(model), indicators(model), inventory(model), observations(model));
 }
 var quoted = (text) => `"${text.replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"`;
 /** Arial everywhere in the document, margins included (docs/design.md §11); the screen keeps its own font. */
 var PDF_FONT_FAMILY = "Arial, \"Helvetica Neue\", Helvetica, sans-serif";
-/** Footer logo: its height, the widest it may be, and the width kept for it at the bottom left of every page. */
-var FOOTER_LOGO_HEIGHT_MM = 8;
-var FOOTER_LOGO_MAX_WIDTH_MM = 34;
-var FOOTER_LOGO_BOX_MM = 38;
+/**
+* Footer logo (docs/design.md §11): 10 mm high, 42,5 mm wide at most, in a place of 46 mm at
+* the bottom left of every page; its bottom stands 4,5 mm above the edge of the page.
+*/
+var FOOTER_LOGO_HEIGHT_MM = 10;
+var FOOTER_LOGO_MAX_WIDTH_MM = 42.5;
+var FOOTER_LOGO_BOX_MM = 46;
+var FOOTER_LOGO_FROM_EDGE_MM = 4.5;
+/** Margins of the pages. The cover goes lower: its two logos stand in the footer, on the line of the footer logo. */
+var PAGE_MARGINS = "16mm 12mm 16mm 12mm";
+var COVER_BOTTOM_MARGIN_MM = 4;
 var PX_PER_MM = 96 / 25.4;
+/** Printed size of the footer logo, in millimetres; null without the image. */
+function footerLogoSize(size) {
+	if (size === null || size.width <= 0 || size.height <= 0) return null;
+	const scale = Math.min(FOOTER_LOGO_HEIGHT_MM / size.height, FOOTER_LOGO_MAX_WIDTH_MM / size.width);
+	return {
+		width: size.width * scale,
+		height: size.height * scale
+	};
+}
 /**
 * The Natixis logo as the content of its margin box, never as a background: it is printed
 * whatever the « background graphics » setting of the print window. `image-set` gives the
 * image its printed size: so many of its own pixels for one CSS pixel.
 */
 function footerLogo(size) {
-	if (size === null || size.width <= 0 || size.height <= 0) return "\"\"";
-	const density = Math.max(size.height / (FOOTER_LOGO_HEIGHT_MM * PX_PER_MM), size.width / (FOOTER_LOGO_MAX_WIDTH_MM * PX_PER_MM));
+	const printed = footerLogoSize(size);
+	if (size === null || printed === null) return "\"\"";
+	const density = size.height / (printed.height * PX_PER_MM);
 	return `image-set(url(${LOGO_FILES.natixis}) ${density.toFixed(4)}x)`;
 }
 /**
@@ -36221,14 +36203,14 @@ function pageRules(model) {
 	const font = (weight, size) => `font: ${weight} ${size} ${PDF_FONT_FAMILY};`;
 	const header = (name, title) => `@page ${name} { @top-left { content: ${quoted(title)}; ${font(600, "9pt")} color: ${color("--ink-2")}; } }`;
 	return [
-		`@page { size: A4 landscape; margin: 16mm 12mm 14mm 12mm;`,
+		`@page { size: A4 landscape; margin: ${PAGE_MARGINS};`,
 		`  @top-right { content: ${quoted(model.nominalLabel)}; ${font(600, "9pt")} color: ${color("--ink-2")}; }`,
 		model.demo ? `  @top-center { content: ${quoted(DEMO_MENTION)}; ${font(700, "9pt")} color: ${color("--ink-2")}; }` : "",
-		`  @bottom-left { content: ${footerLogo(logoSize("natixis"))}; width: ${FOOTER_LOGO_BOX_MM}mm; text-align: left; vertical-align: middle; }`,
+		`  @bottom-left { content: ${footerLogo(logoSize("natixis"))}; width: ${FOOTER_LOGO_BOX_MM}mm; padding-bottom: ${FOOTER_LOGO_FROM_EDGE_MM}mm; font-size: 0; line-height: 0; text-align: left; vertical-align: bottom; }`,
 		`  @bottom-center { content: ${quoted(model.generalMention)}; ${font(400, "6pt")} color: ${color("--ink-3")}; text-align: left; vertical-align: middle; }`,
 		`  @bottom-right { content: counter(page) " / " counter(pages); width: ${FOOTER_LOGO_BOX_MM}mm; ${font(600, "8pt")} color: ${color("--ink-2")}; text-align: right; vertical-align: middle; }`,
 		`}`,
-		`@page garde { @top-right { content: none; } @top-center { content: ${model.demo ? quoted(DEMO_MENTION) : "none"}; } @bottom-right { content: ""; } }`,
+		`@page garde { margin-bottom: ${COVER_BOTTOM_MARGIN_MM}mm; @top-right { content: none; } @top-center { content: ${model.demo ? quoted(DEMO_MENTION) : "none"}; } @bottom-left { content: none; } @bottom-center { content: none; } @bottom-right { content: none; } }`,
 		header("indicateurs", PDF_SECTIONS.indicators),
 		header("inventaire", PDF_SECTIONS.inventory),
 		header("constatations", PDF_SECTIONS.observations)
@@ -42191,11 +42173,11 @@ a {
  */
 
 /*
- * Case « Nominal » du PDF : violet pâle uni et son texte.
- * Seules couleurs écrites hors de tokens.css — à remplacer par la référence de la charte Natixis.
+ * Case « Nominal » du PDF : violet uni et son texte. Seules couleurs écrites hors de tokens.css.
+ * Fond : le violet donné par Léo le 08/10/2026. Texte : à remplacer par la référence de la charte Natixis.
  */
 :root {
-  --pdf-nominal-bg: #ece4fb;
+  --pdf-nominal-bg: #c6b8d2;
   --pdf-nominal-ink: #2b1a4f;
 }
 
@@ -42285,11 +42267,6 @@ a {
     font-family: inherit;
   }
 
-  /* Copie cachée du logo de pied de page : l'impression attend que l'image soit lue. */
-  .print-preload {
-    display: none;
-  }
-
   /* Chaque section commence sur sa page, et porte son titre dans l'en-tête de page. */
   .print-cover {
     page: garde;
@@ -42324,10 +42301,11 @@ a {
   }
 
   /* ── Page de garde ── */
+  /* La page de garde descend jusqu'à 4 mm du bord (pages/pdf.ts) : 190 mm de haut, moins une marge de sécurité. */
   .print-cover {
     display: flex;
     flex-direction: column;
-    height: 176mm;
+    height: 189.5mm;
   }
 
   .print-logo-image {
@@ -42388,17 +42366,41 @@ a {
     object-position: right center;
   }
 
-  /* Logo BPCE : en bas à droite de la page de garde seulement, deux fois plus haut qu'avant (24 mm). */
+  /*
+   * Bas de la page de garde : les deux logos posés sur la même ligne, la mention entre eux.
+   * Natixis à gauche, à la place et à la taille qu'il a dans le pied des autres pages ;
+   * BPCE à droite, 36 mm de haut, sur cette page seulement.
+   */
   .print-cover-foot {
     display: flex;
     flex: none;
-    justify-content: flex-end;
-    height: 24mm;
+    align-items: flex-end;
+    height: 36mm;
+  }
+
+  .print-cover-natixis {
+    flex: none;
+    width: 46mm;
+  }
+
+  .print-cover-natixis-image {
+    display: block;
+  }
+
+  .print-cover-mention {
+    flex: 1 1 0;
+    min-width: 0;
+    margin: 0;
+    padding-right: 8mm;
+    color: var(--ink-3);
+    font-size: 6pt;
+    line-height: 1.3;
   }
 
   .print-cover-bpce {
-    height: 24mm;
-    max-width: 90mm;
+    flex: none;
+    height: 36mm;
+    max-width: 135mm;
   }
 
   .print-cover-bpce .print-logo-image {
