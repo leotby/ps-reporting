@@ -35152,7 +35152,7 @@ function cardHead(model, mode) {
 	return h("div", { class: "event-card-head" }, h("div", {
 		class: "event-date",
 		attrs: { "aria-hidden": "true" }
-	}, h("span", { class: "event-date-day" }, model.day), h("span", { class: "event-date-month" }, model.month)), h("div", { class: "event-card-title" }, h("h3", { class: "event-card-name" }, model.name), model.holding === null ? null : h("p", { class: "event-card-holding" }, model.holding), h("div", { class: "event-card-pills" }, h("span", { class: "pill" }, model.typeLabel), model.past ? internal(mode, () => h("span", { class: "pill pill-internal" }, internalMarker(), model.countdownLabel)) : h("span", { class: `pill${model.soon ? " is-soon" : ""}` }, model.countdownLabel))));
+	}, h("span", { class: "event-date-day" }, model.day), h("span", { class: "event-date-month" }, model.month)), h("div", { class: "event-card-title" }, h("h3", { class: "event-card-name" }, model.name), h("p", { class: "event-card-holding" }, model.holding ?? model.isin), h("div", { class: "event-card-pills" }, h("span", { class: "pill" }, model.typeLabel), model.past ? internal(mode, () => h("span", { class: "pill pill-internal" }, internalMarker(), model.countdownLabel)) : h("span", { class: `pill${model.soon ? " is-soon" : ""}` }, model.countdownLabel))));
 }
 /** Reference level and gauge; or that the product has no reference level. */
 function cardGauge(model) {
@@ -36275,6 +36275,7 @@ function pdfDocumentModel(state, parameters, today, texts) {
 		const frequency = frequencyLabel(product.frequency);
 		return {
 			name: card.name,
+			isin: card.isin,
 			facts: [
 				{
 					label: "Date",
@@ -36378,7 +36379,7 @@ function inventory(model) {
 	}, column.label)))), h("tbody", null, ...table.rows.map((row) => h("tr", null, ...row.cells.map((cell, index) => h("td", { class: `col-${table.columns[index]?.id ?? ""} tone-${cell.tone}${table.columns[index]?.numeric === true ? " is-numeric" : ""}` }, ...cell.lines.map((line) => h("div", { class: "cell-line" }, line)), ...cell.sublines.map((subline) => h("div", { class: "cell-sub" }, subline)))))))));
 }
 function observations(model) {
-	return h("section", { class: "print-section print-observations" }, h("h2", { class: "print-title" }, PDF_SECTIONS.observations), model.observations.length === 0 ? h("p", null, "Aucune constatation à venir pour ces comptes.") : null, h("div", { class: "print-cards" }, ...model.observations.map((observation) => h("article", { class: "print-card" }, h("h3", { class: "print-card-name" }, observation.name), h("dl", { class: "print-facts print-facts-pairs" }, ...observation.facts.flatMap((fact) => [h("dt", null, fact.label), h("dd", null, fact.value)])), h("p", { class: "print-card-reference" }, observation.reference), observation.gauge === null ? null : gauge(observation.gauge), h("dl", { class: "print-facts" }, ...observation.barriers.flatMap((barrier) => [h("dt", null, barrier.label), h("dd", null, [
+	return h("section", { class: "print-section print-observations" }, h("h2", { class: "print-title" }, PDF_SECTIONS.observations), model.observations.length === 0 ? h("p", null, "Aucune constatation à venir pour ces comptes.") : null, h("div", { class: "print-cards" }, ...model.observations.map((observation) => h("article", { class: "print-card" }, h("div", { class: "print-card-head" }, h("h3", { class: "print-card-name" }, observation.name), h("span", { class: "print-card-isin" }, observation.isin)), h("dl", { class: "print-facts print-facts-pairs" }, ...observation.facts.flatMap((fact) => [h("dt", null, fact.label), h("dd", null, fact.value)])), h("p", { class: "print-card-reference" }, observation.reference), observation.gauge === null ? null : gauge(observation.gauge), h("dl", { class: "print-facts" }, ...observation.barriers.flatMap((barrier) => [h("dt", null, barrier.label), h("dd", null, [
 		barrier.level,
 		barrier.distance,
 		barrier.note
@@ -42854,10 +42855,15 @@ a {
   }
 
   /* ── Prochaines constatations : deux cartes par ligne, jamais coupées, jauge en couleur ── */
+  /* Espacements d'un demi-millimètre plus serrés qu'ailleurs : trois rangées tiennent sur la page même quand un nom long, à côté de son ISIN, prend deux lignes. */
+  .print-observations {
+    gap: 8px;
+  }
+
   .print-cards {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 10px;
+    gap: 8px;
   }
 
   .print-card {
@@ -42871,9 +42877,26 @@ a {
     break-inside: avoid;
   }
 
+  /* Le nom du produit, et son code ISIN à droite sur la même ligne. */
+  .print-card-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 4mm;
+  }
+
   .print-card-name {
+    min-width: 0;
     font-size: 8.5pt;
     font-weight: 700;
+  }
+
+  .print-card-isin {
+    flex: none;
+    color: var(--ink-3);
+    font-size: 7pt;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
   }
 
   .print-card-reference {
