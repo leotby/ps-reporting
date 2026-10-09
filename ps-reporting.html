@@ -38273,7 +38273,7 @@ function stack(x, width, coupons, capital, scale, hatched, faded) {
 }
 function bars(month, left, slot, scale) {
 	const count = month.bars.length;
-	const width = Math.min(slot * (count > 1 ? .38 : .7), 30);
+	const width = count > 1 ? Math.min(slot * .38, 34) : Math.min(slot * .7, 56);
 	const gap = count > 1 ? Math.min(slot * .06, 3) : 0;
 	const start = left + (slot - (count * width + (count - 1) * gap)) / 2;
 	return month.bars.flatMap((bar, index) => {
@@ -38749,6 +38749,7 @@ function calendarModel(simulation, lines) {
 			isin: product.isin,
 			name: product.name ?? product.isin,
 			status: result.endDate === null ? HORIZON_STATUS_LABELS[result.status] : `${HORIZON_STATUS_LABELS[result.status]} le ${formatDate(result.endDate)}`,
+			statusKind: result.status,
 			rows: lines.filter((line) => line.isin === product.isin)
 		});
 	}
@@ -38792,6 +38793,13 @@ var SUMMARY_COLUMNS = [
 	}
 ];
 var REMOVED_LABEL = "Retiré de la simulation";
+/** A missing amount is not zero: only an amount that is there and equal to 0 counts. */
+var zeroes = (amounts) => ({
+	firstCoupon: amounts.firstCoupon === 0,
+	followingCoupons: amounts.followingCoupons === 0,
+	totalCoupons: amounts.totalCoupons === 0,
+	capitalRepaid: amounts.capitalRepaid === 0
+});
 /** A click on a header: ascending, then descending, then back to the order of the positions. */
 function nextSummarySort(current, column) {
 	if (current === null || current.column !== column) return {
@@ -38826,6 +38834,7 @@ function summaryRows(simulation, removed, sort, highlightIsin) {
 			followingCoupons: amount(subtotal.followingCoupons, subtotal.currency, "—"),
 			totalCoupons: amount(subtotal.totalCoupons, subtotal.currency, "—"),
 			capitalRepaid: amount(subtotal.capitalRepaid, subtotal.currency, absent),
+			zero: zeroes(subtotal),
 			status,
 			statusDetail: simulated ? subtotal.statusDate === null ? null : formatDate(subtotal.statusDate) : reasons.get(subtotal.isin) ?? null,
 			sortValues: {
@@ -38850,6 +38859,12 @@ function summaryRows(simulation, removed, sort, highlightIsin) {
 		followingCoupons: "—",
 		totalCoupons: "—",
 		capitalRepaid: "—",
+		zero: zeroes({
+			firstCoupon: null,
+			followingCoupons: null,
+			totalCoupons: null,
+			capitalRepaid: null
+		}),
 		status: REMOVED_LABEL,
 		statusDetail: null,
 		sortValues: {
@@ -38912,6 +38927,18 @@ var SIMULATOR_HELP = "Choisissez d’abord un ou plusieurs comptes avec la reche
 * rows, the padding and the border of the band. Above, the console is not pinned.
 */
 var PINNED_CONSOLE_MAX_HEIGHT = 124;
+/**
+* The dot of a status at the horizon: the colour of the outcome it tells (design.md §10).
+* A product still alive has no outcome yet, hence no dot; one not simulated at maturity has
+* the dotted ring of « Non simulé ».
+*/
+var STATUS_DOTS = {
+	active: null,
+	recalled: "recall",
+	expiredRedeemed: "maturityRedeemed",
+	expiredLoss: "maturityLoss",
+	expiredNotSimulated: "maturityNotSimulated"
+};
 var FLOW_MODES = [{
 	value: "monthly",
 	label: "Par mois"
@@ -39093,6 +39120,8 @@ function mountSimulateur(host, store) {
 			}
 		}))), h("dl", { class: "sim-totals" }, ...detail.totals.flatMap((total) => [h("dt", null, total.label), h("dd", null, total.value)])), detail.cards.length === 0 ? h("p", { class: "section-note" }, "Aucune constatation simulée ce mois-là.") : h("div", { class: "sim-cards" }, ...detail.cards.map((card) => h("article", { class: "sim-card" }, h("h4", { class: "sim-card-name" }, card.name), h("p", { class: "cell-sub" }, `${card.isin} · ${card.dateLabel}`), eventMark(card), h("dl", { class: "sim-totals" }, h("dt", null, "Coupon"), h("dd", null, card.coupon), h("dt", null, "Nominal"), h("dd", null, card.capital), h("dt", null, "Total"), h("dd", null, card.total)), ...card.barriers.map((state) => h("p", { class: "cell-sub" }, state)))))));
 	}
+	/** A zero is written, in a lighter tone than the amounts paid (design.md §10). */
+	const zeroTone = (zero) => zero ? " is-zero" : "";
 	function summary(primary, holdings) {
 		const rows = summaryRows(primary, removedProducts(holdings, removed), sort, highlight);
 		const exportSimulation = () => {
@@ -39112,7 +39141,7 @@ function mountSimulateur(host, store) {
 			focusKey: "sim-export",
 			onClick: exportSimulation
 		}))), h("div", {
-			class: "inventory-frame scroll",
+			class: "inventory-frame sim-summary-frame scroll",
 			attrs: {
 				tabindex: 0,
 				role: "group",
@@ -39160,7 +39189,7 @@ function mountSimulateur(host, store) {
 					update();
 				} }
 			}, row.name);
-			return h("tr", { class: `${row.highlighted ? "is-highlighted" : ""}${row.checked ? "" : " is-off"}` }, h("td", null, box), h("td", { class: "col-product tone-strong" }, name, h("div", { class: "cell-sub" }, row.isin)), h("td", { class: "is-numeric tone-strong" }, h("div", { class: "cell-line" }, row.nominal)), h("td", { class: "is-numeric" }, row.firstCoupon), h("td", { class: "is-numeric" }, row.followingCoupons), h("td", { class: "is-numeric tone-strong" }, h("div", { class: "cell-line" }, row.totalCoupons)), h("td", { class: "is-numeric" }, row.capitalRepaid), h("td", { class: "col-status" }, h("div", { class: "cell-line" }, row.status), row.statusDetail === null ? null : h("div", { class: "cell-sub" }, row.statusDetail)));
+			return h("tr", { class: `${row.highlighted ? "is-highlighted" : ""}${row.checked ? "" : " is-off"}` }, h("td", null, box), h("td", { class: "col-product tone-strong" }, name, h("div", { class: "cell-sub" }, row.isin)), h("td", { class: "is-numeric tone-strong" }, h("div", { class: "cell-line" }, row.nominal)), h("td", { class: `is-numeric${zeroTone(row.zero.firstCoupon)}` }, row.firstCoupon), h("td", { class: `is-numeric${zeroTone(row.zero.followingCoupons)}` }, row.followingCoupons), h("td", { class: `is-numeric tone-strong${zeroTone(row.zero.totalCoupons)}` }, h("div", { class: "cell-line" }, row.totalCoupons)), h("td", { class: `is-numeric${zeroTone(row.zero.capitalRepaid)}` }, row.capitalRepaid), h("td", { class: "col-status" }, h("div", { class: "cell-line" }, row.status), row.statusDetail === null ? null : h("div", { class: "cell-sub" }, row.statusDetail)));
 		})))));
 	}
 	function calendar(primary, lines) {
@@ -39168,9 +39197,9 @@ function mountSimulateur(host, store) {
 		return h("section", {
 			class: "section",
 			attrs: { "aria-label": "Calendrier des constatations simulées" }
-		}, h("div", { class: "section-head" }, h("h2", { class: "section-title" }, "Calendrier des constatations simulées"), h("span", { class: "section-note" }, compare ? `scénario « ${SCENARIO_SHORT_LABELS[scenario]} » · un volet par produit` : "un volet par produit")), products.length === 0 ? h("p", { class: "page-help" }, "Aucun produit simulé.") : h("div", { class: "sim-calendar" }, ...products.map((product) => {
+		}, h("div", { class: "section-head" }, h("h2", { class: "section-title" }, "Calendrier des constatations simulées"), h("span", { class: "section-note" }, compare ? `scénario « ${SCENARIO_SHORT_LABELS[scenario]} » · un volet par produit` : "un volet par produit")), products.length === 0 ? h("p", { class: "page-help" }, "Aucun produit simulé.") : h("div", { class: "sim-calendar tile" }, ...products.map((product) => {
 			const panel = h("details", {
-				class: "sim-panel tile",
+				class: "sim-panel",
 				attrs: {
 					"data-isin": product.isin,
 					open: openPanels.has(product.isin)
@@ -39178,7 +39207,13 @@ function mountSimulateur(host, store) {
 			}, h("summary", {
 				class: "sim-panel-head",
 				attrs: { [FOCUS_KEY]: `sim-panel-${product.isin}` }
-			}, h("span", { class: "sim-panel-name" }, product.name), h("span", { class: "section-note" }, `${product.isin} · ${product.status}`), h("span", {
+			}, h("span", { class: "sim-panel-name" }, product.name), h("span", { class: "section-note" }, product.isin), h("span", { class: "sim-status" }, ...[STATUS_DOTS[product.statusKind]].map((kind) => kind === null ? null : h("span", {
+				class: "sim-event-dot",
+				attrs: {
+					"data-kind": kind,
+					"aria-hidden": "true"
+				}
+			})), product.status), h("span", {
 				class: "sim-panel-chevron",
 				attrs: { "aria-hidden": "true" }
 			}, icon("sortDown", 14, 2.2))), product.rows.length === 0 ? h("p", { class: "section-note sim-panel-empty" }, "Aucune constatation avant l’horizon.") : h("table", { class: "data-table sim-events" }, h("thead", { class: "on-brand" }, h("tr", null, ...[
@@ -41789,12 +41824,26 @@ a {
 
 .sim-chips {
   display: flex;
-  flex-wrap: wrap;
+  flex: 1 1 100%;
   gap: 6px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+  /* Les pastilles tiennent sur une ligne : un fondu sur le bord droit dit qu'il y en a d'autres.
+     Un masque ne lit que l'opacité : n'importe quel jeton opaque convient. */
+  mask-image: linear-gradient(90deg, var(--ink) calc(100% - 24px), transparent);
+}
+
+.sim-chips::-webkit-scrollbar {
+  display: none;
 }
 
 .sim-chip {
-  padding: 3px 10px;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  height: 22px;
+  padding: 0 9px;
   border-radius: 999px;
   background: var(--tile);
   color: var(--ink-2);
@@ -42066,10 +42115,10 @@ a {
 }
 
 .sim-compared {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  gap: 0 8px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 0 10px;
   font-size: var(--fs-13);
 }
 
@@ -42084,8 +42133,17 @@ a {
 }
 
 .sim-gap {
+  margin-top: 2px;
   padding-top: 6px;
   border-top: 1px solid var(--tile-line);
+}
+
+/* L'écart est le chiffre que la comparaison sert à lire. */
+.sim-gap .sim-compared-value {
+  color: var(--accent);
+  font-size: var(--fs-18);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ── Flux mensuels simulés ── */
@@ -42135,9 +42193,11 @@ a {
 .flow-target {
   fill: transparent;
   cursor: pointer;
+  transition: fill 150ms ease-out;
 }
 
 .flow-target:hover,
+.flow-target:focus-visible,
 .flow-target.is-open {
   fill: var(--icon-bg);
 }
@@ -42285,6 +42345,17 @@ a {
 }
 
 /* ── Récapitulatif et calendrier simulés ── */
+/* Le récapitulatif prend la hauteur de ses lignes : aucune n'est coupée ; il défile seulement en largeur. */
+.sim-summary-frame {
+  max-height: none;
+}
+
+.sim-table td.is-zero,
+.sim-table td.is-zero .cell-line {
+  color: var(--ink-3);
+  font-weight: 400;
+}
+
 .sim-table td {
   vertical-align: middle;
 }
@@ -42309,24 +42380,48 @@ a {
 .sim-calendar {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  overflow: hidden;
 }
 
-.sim-panel {
-  overflow: hidden;
+/* Un volet n'a ni fond ni bord propres : un filet le sépare du suivant. */
+.sim-panel + .sim-panel {
+  border-top: 1px solid var(--tile-line);
 }
 
 .sim-panel-head {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
   gap: 4px 12px;
   padding: 14px 20px;
   cursor: pointer;
 }
 
+.sim-panel-head:hover {
+  background: var(--chip);
+}
+
 .sim-panel-name {
   font-weight: 700;
+}
+
+/* Statut à l'horizon : une pastille, avec le point de l'issue qu'il dit. */
+.sim-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--chip);
+  color: var(--ink-2);
+  font-size: var(--fs-12);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.sim-status .sim-event-dot {
+  width: 8px;
+  height: 8px;
 }
 
 /* Le volet n'a pas de triangle natif (son en-tête est en ligne flexible) : un chevron le remplace. */
