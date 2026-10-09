@@ -179,8 +179,8 @@ var NOT_CALLABLE_LABEL = "Non rappelable";
 var GUARANTEED_LABEL = "Garanti";
 var OBSERVATION_TYPE_LABELS = {
 	final: "Observation finale",
-	callable: "Observation callable",
-	notCallable: "Observation non callable"
+	callable: "Constatation avec rappel possible",
+	notCallable: "Constatation sans rappel possible"
 };
 /** Indicative outcome at constant level: internal screens only, never the PDF. */
 var INDICATIVE_OUTCOME_LABELS = {
@@ -264,7 +264,8 @@ var HYPOTHESIS_LABELS = {
 	assumedCallBarrier: "Barrière de rappel provisoire supposée à 100 %",
 	assumedCallDate: "Date de rappel absente : rappel supposé possible dès la prochaine constatation",
 	issuerCallNotSimulated: "Rappel émetteur non simulé : le produit est supposé non rappelé",
-	capitalNotSimulated: CAPITAL_NOT_SIMULATED_LABEL
+	capitalNotSimulated: CAPITAL_NOT_SIMULATED_LABEL,
+	airbagLevelUnknown: "Niveau Airbag absent de la base produits avant la dernière constatation : la barrière coupon actuelle est appliquée à l’échéance, les coupons simulés peuvent être sous-estimés (à confirmer)"
 };
 /** The same hypotheses in a few words, for the banner of the simulator; the full sentence is its tooltip. */
 var HYPOTHESIS_SHORT_LABELS = {
@@ -273,7 +274,8 @@ var HYPOTHESIS_SHORT_LABELS = {
 	assumedCallBarrier: "Barrière provisoire supposée",
 	assumedCallDate: "Date de rappel supposée",
 	issuerCallNotSimulated: "Rappel émetteur non simulé",
-	capitalNotSimulated: CAPITAL_NOT_SIMULATED_LABEL
+	capitalNotSimulated: CAPITAL_NOT_SIMULATED_LABEL,
+	airbagLevelUnknown: "Niveau Airbag inconnu : coupons peut-être sous-estimés"
 };
 var CONSTANT_HYPOTHESIS_SHORT_LABELS = [
 	"Flux datés à la constatation",
@@ -330,6 +332,12 @@ var MONTH_SHORT_LABELS = [
 var OUTCOME_NOT_EVALUATED_LABEL = "Issue non évaluée";
 var NOMINAL_SUBSCRIBED_LABEL = "Nominal souscrit";
 var POTENTIAL_COUPON_LABEL = "Prochain coupon potentiel";
+/** The same figure in the client PDF (produit.md §9, page d): no tooltip there, and no reason when it is absent. */
+var NEXT_COUPON_LABEL = "Prochain coupon";
+/** The three dates at the top of a card of the client PDF, in this order (produit.md §9, page d). */
+var NEXT_OBSERVATION_LABEL = "Prochaine constatation";
+var NEXT_CALL_OBSERVATION_LABEL = "Prochaine constatation de rappel";
+var MATURITY_LABEL = "Échéance";
 /** Said on hover: the amount is conditional, it is not a forecast (regles-metier.md §2). */
 var POTENTIAL_COUPON_TIP = "Montant versé à la prochaine constatation si la condition du coupon est remplie. Ce n’est pas une prévision.";
 /** Why a card has no potential coupon: said in words, never a 0. */
@@ -1228,9 +1236,9 @@ function memorySplit(product, duePct) {
 * Potential next coupon of a product on a selection (§2): what is paid at the next
 * observation if the condition is met — not a forecast. It depends neither on the level of
 * the underlying nor on the indicative outcome. `nominal` is the nominal subscribed, in the
-* currency of the product; `unitsPerEur` its rate, null without one (1 for the euro).
+* currency of the product, and so is the amount: one product is never converted (§0).
 */
-function potentialCoupon(product, nominal, unitsPerEur) {
+function potentialCoupon(product, nominal) {
 	const pct = product.nextCouponPct;
 	if (pct === null) return {
 		coupon: null,
@@ -1242,7 +1250,6 @@ function potentialCoupon(product, nominal, unitsPerEur) {
 		coupon: {
 			pct,
 			amount,
-			amountEur: product.currency === "EUR" || unitsPerEur === null ? null : toEur(amount, unitsPerEur),
 			inMemoryPct: inMemory !== null && inMemory > .01 ? inMemory : null
 		},
 		gap: null
@@ -1503,6 +1510,11 @@ function reconcile(input) {
 				name: "commerciaux",
 				variants: variantsOf(group.lines, (line) => line.banker),
 				field: "banker"
+			},
+			{
+				name: "assureurs",
+				variants: variantsOf(group.lines, (line) => line.insurer),
+				field: "accountLabel"
 			}
 		];
 		for (const { name, variants, field } of identity) {
@@ -1524,6 +1536,7 @@ function reconcile(input) {
 		const holder = identity[0].variants[0]?.value ?? firstValue(group.lines, (line) => line.holder);
 		const manager = identity[1].variants[0]?.value ?? null;
 		const banker = identity[2].variants[0]?.value ?? null;
+		const insurer = nature === "ASV" ? identity[3].variants[0]?.value ?? null : null;
 		const bankerCode = variantsOf(group.lines, (line) => line.bankerCode)[0]?.value ?? null;
 		const accountPositions = [];
 		for (const [isin, isinLines] of group.linesByIsin) {
@@ -1574,6 +1587,7 @@ function reconcile(input) {
 			id: group.id,
 			nature,
 			holder,
+			insurer,
 			manager,
 			banker,
 			bankerCode,
@@ -32863,6 +32877,7 @@ function readLine(row, fileName, config) {
 	const accountId = isLifeInsurance ? lifeContractNumber ?? accountNumber : accountNumber;
 	const holder = isLifeInsurance ? lifeContractHolder ?? accountLabel : accountLabel;
 	const holderIsInsurer = holder !== null && config.insurers.has(normalizeKey(holder));
+	const insurer = isLifeInsurance && accountLabel !== null && config.insurers.has(normalizeKey(accountLabel)) ? accountLabel : null;
 	return {
 		source: {
 			file: fileName,
@@ -32892,7 +32907,8 @@ function readLine(row, fileName, config) {
 		nature: isLifeInsurance ? "ASV" : "TIT",
 		accountId,
 		holder,
-		holderIsInsurer
+		holderIsInsurer,
+		insurer
 	};
 }
 function readPositionLines(sheet, resolution, config = NATIXIS_CONFIG) {
@@ -33907,7 +33923,7 @@ function capitalAtMaturity(product, level) {
 			if (protection === null || protection.kind !== "level" || level === null || direction === null) return null;
 			if (meetsBarrier(level, protection.level, direction)) return 100;
 			if (direction === "BEARISH") return null;
-			return product.airbag ? level / protection.level * 100 : level;
+			return level;
 		}
 		case "partiallyGuaranteed":
 		case "leveraged":
@@ -34010,6 +34026,7 @@ function simulateProduct(product, settings) {
 			callable
 		});
 	}
+	const airbagLevelUnknown = product.airbag && next !== final && status !== "active" && status !== "recalled";
 	return {
 		simulated: true,
 		status,
@@ -34017,7 +34034,8 @@ function simulateProduct(product, settings) {
 		level,
 		events,
 		callBarrier,
-		callDateAssumed
+		callDateAssumed,
+		airbagLevelUnknown
 	};
 }
 /** Type of the next observation, shown everywhere, PDF included. Null without a next observation. */
@@ -34029,6 +34047,20 @@ function observationType(product) {
 	if (autocall.state === "active" && (firstCall === next || firstCall === null)) return "callable";
 	if (autocall.state === "notYetCallable" && firstCall === next) return "callable";
 	return "notCallable";
+}
+/**
+* Next call observation (§6): the first observation date, from the next one, at which a
+* recall is possible under §7.3. Null when the product has no recall, or has none left: no
+* autocall, not callable yet without a call date, and from the last observation on — at the
+* final date the maturity rule applies. Dates only: no level is needed to tell it.
+*/
+function nextCallObservation(product) {
+	const { autocall, nextObservationDate: next, nextCallObservationDate: firstCall, finalObservationDate: final } = product;
+	if (next === null || final === null || autocall.state === "none") return null;
+	const from = firstCall ?? (autocall.state === "active" ? next : null);
+	if (from === null) return null;
+	const date = from < next ? next : from;
+	return date < final ? date : null;
 }
 var OUTCOME_OF = {
 	recall: "recall",
@@ -34083,7 +34115,8 @@ function indicativeOutcome(product, asOfDate) {
 * of the product, and each interval takes the outcome the rules give AT THIS OBSERVATION
 * for a level inside it — so the zone under the reference level always says what the
 * indicative outcome says. A loss of capital only shows at the final observation. Two
-* neighbouring intervals with the same outcome make one zone. Nothing is decided here by
+* neighbouring intervals with the same outcome make one zone — but a redemption at maturity
+* with the final coupon and one without it stay two zones. Nothing is decided here by
 * comparing levels: the simulator is asked. Empty when the product has no indicative outcome
 * at its own level.
 */
@@ -34100,16 +34133,19 @@ function outcomeZones(product, asOfDate) {
 	for (let index = 0; index <= thresholds.length; index += 1) {
 		const from = index === 0 ? null : thresholds[index - 1];
 		const to = index === thresholds.length ? null : thresholds[index];
-		const { outcome } = evaluateNext(product, asOfDate, from === null ? to === null ? referenceLevel(product) ?? 100 : to - 1 : to === null ? from + 1 : (from + to) / 2);
+		const { outcome, event } = evaluateNext(product, asOfDate, from === null ? to === null ? referenceLevel(product) ?? 100 : to - 1 : to === null ? from + 1 : (from + to) / 2);
+		const withCoupon = event !== null && event.couponPaidPct > 0;
 		const previous = zones.at(-1);
-		if (previous !== void 0 && previous.outcome === outcome) zones[zones.length - 1] = {
+		const same = previous !== void 0 && previous.outcome === outcome && (outcome !== "maturityRedeemed" || previous.withCoupon === withCoupon);
+		if (previous !== void 0 && same) zones[zones.length - 1] = {
 			...previous,
 			to
 		};
 		else zones.push({
 			from,
 			to,
-			outcome
+			outcome,
+			withCoupon
 		});
 	}
 	return zones;
@@ -34179,7 +34215,7 @@ function buildAgenda(holdings, asOfDate, today) {
 		const withRate = held.filter((holding) => holding.nominalEur !== null);
 		const { outcome, gap, event } = indicativeOutcome(product, asOfDate);
 		const nominal = held.reduce((total, holding) => total + holding.nominal, 0);
-		const potential = potentialCoupon(product, nominal, held[0].unitsPerEur);
+		const potential = potentialCoupon(product, nominal);
 		entries.push({
 			product,
 			date,
@@ -34192,8 +34228,8 @@ function buildAgenda(holdings, asOfDate, today) {
 			nominal,
 			potentialCoupon: potential.coupon,
 			potentialCouponGap: potential.gap,
+			nextCallDate: nextCallObservation(product),
 			nominalEur: withRate.length === 0 ? null : withRate.reduce((total, holding) => total + (holding.nominalEur ?? 0), 0),
-			positionsWithoutRate: held.length - withRate.length,
 			accountCount: new Set(held.map((holding) => holding.position.accountId)).size,
 			countdown: countdown(date, today)
 		});
@@ -34545,10 +34581,6 @@ var INVENTORY_EXPORT_COLUMNS = [
 		cell: (row) => NATURE_LABELS[row.nature]
 	},
 	{
-		header: "Nominal (EUR)",
-		cell: (row) => amount(row.nominalEur)
-	},
-	{
 		header: "Valorisation (EUR)",
 		cell: (row) => amount(row.marketValueEur)
 	}
@@ -34561,8 +34593,6 @@ var HYPOTHESES = [
 /** Sheets of the export: the inventory, then the information sheet. */
 function inventorySheets(rows, context) {
 	const warnings = [];
-	const withoutRate = rows.filter((row) => row.nominalEur === null).length;
-	if (withoutRate > 0) warnings.push(`${withoutRate} position(s) sans taux de change : leur nominal en euros est absent, et non compté pour 0.`);
 	const truncated = rows.filter((row) => row.underlyings.length > 6).length;
 	if (truncated > 0) warnings.push(`${truncated} position(s) portent sur un produit de plus de 6 sous-jacents : seuls les 6 premiers figurent dans les colonnes (anomalie TROP_DE_SOUS_JACENTS).`);
 	return [{
@@ -34627,7 +34657,6 @@ function buildInventory(holdings) {
 			observationType: observationType(product),
 			nextCoupon: nextCouponAmount(product, nominal),
 			couponsReceived: couponsReceivedAmount(product, nominal),
-			nominalEur: holding.nominalEur,
 			marketValueEur: position.marketValueEur
 		};
 	});
@@ -35113,7 +35142,7 @@ function gauge(model) {
 			"aria-label": model.description
 		}
 	}, h("div", { class: "gauge-track" }, ...model.zones.map((zone) => h("span", {
-		class: "gauge-zone",
+		class: `gauge-zone${zone.soft ? " is-soft" : ""}`,
 		attrs: {
 			"data-outcome": zone.outcome,
 			style: `left: ${percent(zone.left)}; width: ${percent(zone.width)}`
@@ -35162,25 +35191,6 @@ function cardGauge(model) {
 function cardChips(model) {
 	return h("div", { class: `barrier-chips${model.chips.length === 2 ? " is-pair" : ""}` }, ...model.chips.map((chip) => h("div", { class: "barrier-chip" }, h("span", { class: "barrier-chip-label" }, chip.label), h("span", { class: "barrier-chip-level" }, chip.level), chip.distance === null ? null : h("span", { class: "barrier-chip-distance" }, chip.distance), chip.note === null ? null : h("span", { class: "barrier-chip-note" }, chip.note))));
 }
-/** Card of the Dashboard: everything stacked, two cards per row (docs/design.md §6.3). */
-function eventCard(model, mode) {
-	return h("article", {
-		class: "event-card tile",
-		attrs: { "aria-label": `${model.name}, ${model.typeLabel} du ${model.date}` }
-	}, outcomeBand(model.banner), h("div", { class: "event-card-body" }, cardHead(model, mode), cardGauge(model), cardChips(model)));
-}
-/** Two cards per row; beyond five rows the grid scrolls in the page (docs/design.md §6.3). */
-function eventGrid(models, mode, scrolling) {
-	return h("div", {
-		class: `event-grid${scrolling ? " is-scrolling scroll" : ""}`,
-		attrs: scrolling ? {
-			tabindex: 0,
-			role: "group",
-			"aria-label": "Prochains événements",
-			[SCROLL_KEY]: "events"
-		} : {}
-	}, ...models.map((model) => eventCard(model, mode)));
-}
 /** Nominal subscribed and potential next coupon: not internal, shown in presentation mode too. */
 function cardFigures$1(figures) {
 	return h("div", { class: "event-figures" }, h("div", {
@@ -35192,8 +35202,9 @@ function cardFigures$1(figures) {
 	}, withTip(h("span", { class: "event-figure-label" }, figures.couponLabel), figures.couponTip), h("span", { class: "event-figure-value" }, figures.coupon), ...figures.couponLines.map((line) => h("span", { class: "event-figure-line" }, line))));
 }
 /**
-* Card of the Analyse PS: one per row, on the whole width (docs/design.md §6.3). Under the
-* outcome band, three columns: the identity of the product, its gauge, its figures.
+* Card of the Analyse PS and of the Dashboard: one per row, on the whole width (docs/design.md
+* §6.3). Under the outcome band, three columns: the identity of the product, its gauge, its
+* barriers — with the two figures of the Analyse PS, which the Dashboard does not show.
 */
 function eventRow(model, mode) {
 	return h("article", {
@@ -35299,7 +35310,8 @@ function gaugeModel(input, scale = commonScale([input])) {
 		zones.push({
 			left,
 			width,
-			outcome: zone.outcome
+			outcome: zone.outcome,
+			soft: zone.outcome === "maturityRedeemed" && !zone.withCoupon
 		});
 	}
 	const barriers = shownBarriers(input);
@@ -35394,14 +35406,17 @@ function banner(entry) {
 		detail: outcomeGap === null ? "" : outcomeGapLabel(outcomeGap, product.familyReason)
 	};
 }
-/** Total nominal and holding accounts; the nominal is left out when no position has a rate. */
+/**
+* Total nominal and holding accounts. One product: its nominal is the sum of the nominals of
+* every position, in its own currency, never converted (regles-metier.md §0).
+*/
 function holdingLine(entry) {
 	const accounts = `${formatCount(entry.accountCount)} compte${entry.accountCount > 1 ? "s" : ""}`;
-	const parts = [entry.product.isin];
-	if (entry.nominalEur !== null) parts.push(formatAmount(entry.nominalEur, "EUR"));
-	parts.push(accounts);
-	if (entry.positionsWithoutRate > 0) parts.push(`hors ${formatCount(entry.positionsWithoutRate)} position${entry.positionsWithoutRate > 1 ? "s" : ""} sans taux de change`);
-	return parts.join(" · ");
+	return [
+		entry.product.isin,
+		formatAmount(entry.nominal, entry.product.currency),
+		accounts
+	].join(" · ");
 }
 /** Nominal subscribed and potential next coupon, as the rules give them (regles-metier.md §2 and §2.2). */
 function cardFigures(entry) {
@@ -35411,7 +35426,6 @@ function cardFigures(entry) {
 	if (coupon === null) lines.push(POTENTIAL_COUPON_GAP_LABELS[entry.potentialCouponGap ?? "missingNextCoupon"]);
 	else {
 		lines.push(`${formatPercent(coupon.pct, 2)} du nominal`);
-		if (coupon.amountEur !== null) lines.push(`soit ${formatAmount(coupon.amountEur, "EUR")}`);
 		if (coupon.inMemoryPct !== null) lines.push(`dont ${formatPercent(coupon.inMemoryPct, 2)} en mémoire`);
 	}
 	return {
@@ -35701,6 +35715,8 @@ var SEARCH_HELP = "Recherchez un compte par son numéro, par un numéro de contr
 var NO_RESULT_LABEL = "Aucun compte ne correspond";
 var MORE_RESULTS_LABEL = "D’autres comptes correspondent : précisez la recherche";
 var CLEAR_SELECTION_LABEL = "Nouvelle recherche";
+/** « numéro de contrat · assureur »: the insurer next to the contract number, when there is one. */
+var numberWithInsurer = (number, insurer) => insurer === null ? number : `${number} · ${insurer}`;
 /** `results` may hold one result more than `limit`: it only tells that there are more. */
 function suggestionList(results, selectedIds, limit = 8) {
 	const selected = new Set(selectedIds);
@@ -35710,6 +35726,7 @@ function suggestionList(results, selectedIds, limit = 8) {
 			holder: result.account.holder ?? "N/A",
 			number: result.account.id,
 			nature: NATURE_LABELS[result.account.nature],
+			insurer: result.account.insurer,
 			positions: `${formatCount(result.includedCount)} position${result.includedCount > 1 ? "s" : ""}`,
 			nominal: result.nominalEur === null ? "N/A" : formatAmount(result.nominalEur, "EUR"),
 			coverage: result.positionsWithoutRate === 0 ? null : coverageLabel({ missingFxRate: result.positionsWithoutRate }),
@@ -35725,6 +35742,7 @@ function selectionChips(accounts) {
 		holder: account.holder ?? "N/A",
 		number: account.id,
 		nature: NATURE_LABELS[account.nature],
+		insurer: account.insurer,
 		removeLabel: `Retirer le compte ${account.id} de la sélection`
 	}));
 }
@@ -35755,7 +35773,7 @@ function option(model, index, active, onToggle) {
 	}, h("span", {
 		class: "search-check",
 		attrs: { "aria-hidden": "true" }
-	}, model.selected ? icon("check", 12, 3) : null), h("span", { class: "search-who" }, h("span", { class: "search-holder" }, model.holder), h("span", { class: "search-account" }, `${model.number} · ${model.nature}`)), h("span", { class: "search-figures" }, h("span", { class: "search-nominal" }, model.nominal), h("span", { class: "search-account" }, model.coverage === null ? model.positions : `${model.positions} · ${model.coverage}`)));
+	}, model.selected ? icon("check", 12, 3) : null), h("span", { class: "search-who" }, h("span", { class: "search-holder" }, model.holder), h("span", { class: "search-account" }, `${numberWithInsurer(model.number, model.insurer)} · ${model.nature}`)), h("span", { class: "search-figures" }, h("span", { class: "search-nominal" }, model.nominal), h("span", { class: "search-account" }, model.coverage === null ? model.positions : `${model.positions} · ${model.coverage}`)));
 }
 function searchField(options) {
 	let open = false;
@@ -35854,7 +35872,7 @@ function selectionBar(chips, handlers) {
 	return h("div", { class: "selection" }, h("ul", {
 		class: "chips",
 		attrs: { "aria-label": "Comptes sélectionnés" }
-	}, ...chips.map((chip) => h("li", { class: "chip" }, h("span", { class: "chip-holder" }, chip.holder), h("span", { class: "chip-number" }, chip.number), h("span", { class: "chip-nature" }, chip.nature), h("button", {
+	}, ...chips.map((chip) => h("li", { class: "chip" }, h("span", { class: "chip-holder" }, chip.holder), h("span", { class: "chip-number" }, numberWithInsurer(chip.number, chip.insurer)), h("span", { class: "chip-nature" }, chip.nature), h("button", {
 		class: "chip-remove",
 		attrs: {
 			type: "button",
@@ -36273,35 +36291,46 @@ function pdfDocumentModel(state, parameters, today, texts) {
 		const { product } = entry;
 		const level = referenceLevel(product);
 		const frequency = frequencyLabel(product.frequency);
+		const figures = cardFigures(entry);
 		return {
 			name: card.name,
 			isin: card.isin,
-			facts: [
+			dates: [
 				{
-					label: "Date",
+					label: NEXT_OBSERVATION_LABEL,
 					value: card.date
 				},
 				{
-					label: "Type de constatation",
-					value: card.typeLabel
+					label: NEXT_CALL_OBSERVATION_LABEL,
+					value: entry.nextCallDate === null ? "—" : formatDate(entry.nextCallDate)
 				},
 				{
-					label: "Échéance",
+					label: MATURITY_LABEL,
 					value: product.finalObservationDate === null ? "N/A" : formatDate(product.finalObservationDate)
-				},
-				{
-					label: "Fréquence",
-					value: frequency === "" ? "—" : frequency
 				}
 			],
+			facts: [{
+				label: "Type de constatation",
+				value: card.typeLabel
+			}, {
+				label: "Fréquence",
+				value: frequency === "" ? "—" : frequency
+			}],
 			reference: level === null || card.reference === null ? NO_REFERENCE_LEVEL_LABEL : `${card.reference} — ${formatPercent(level, 1)}`,
 			gauge: card.gauge,
 			barriers: card.chips.map((chip) => ({
 				label: BARRIER_LABELS[chip.label] ?? chip.label,
 				level: chip.level,
 				distance: chip.distance,
-				note: chip.note
-			}))
+				note: chip.label === "Rappel" && entry.type !== "callable" ? null : chip.note
+			})),
+			figures: {
+				nominalLabel: NOMINAL_SUBSCRIBED_LABEL,
+				nominal: figures.nominal,
+				couponLabel: NEXT_COUPON_LABEL,
+				coupon: figures.coupon,
+				couponLines: entry.potentialCoupon === null ? [] : figures.couponLines
+			}
 		};
 	});
 	return {
@@ -36379,11 +36408,17 @@ function inventory(model) {
 	}, column.label)))), h("tbody", null, ...table.rows.map((row) => h("tr", null, ...row.cells.map((cell, index) => h("td", { class: `col-${table.columns[index]?.id ?? ""} tone-${cell.tone}${table.columns[index]?.numeric === true ? " is-numeric" : ""}` }, ...cell.lines.map((line) => h("div", { class: "cell-line" }, line)), ...cell.sublines.map((subline) => h("div", { class: "cell-sub" }, subline)))))))));
 }
 function observations(model) {
-	return h("section", { class: "print-section print-observations" }, h("h2", { class: "print-title" }, PDF_SECTIONS.observations), model.observations.length === 0 ? h("p", null, "Aucune constatation à venir pour ces comptes.") : null, h("div", { class: "print-cards" }, ...model.observations.map((observation) => h("article", { class: "print-card" }, h("div", { class: "print-card-head" }, h("h3", { class: "print-card-name" }, observation.name), h("span", { class: "print-card-isin" }, observation.isin)), h("dl", { class: "print-facts print-facts-pairs" }, ...observation.facts.flatMap((fact) => [h("dt", null, fact.label), h("dd", null, fact.value)])), h("p", { class: "print-card-reference" }, observation.reference), observation.gauge === null ? null : gauge(observation.gauge), h("dl", { class: "print-facts" }, ...observation.barriers.flatMap((barrier) => [h("dt", null, barrier.label), h("dd", null, [
+	return h("section", { class: "print-section print-observations" }, h("h2", { class: "print-title" }, PDF_SECTIONS.observations), model.observations.length === 0 ? h("p", null, "Aucune constatation à venir pour ces comptes.") : null, h("div", { class: "print-cards" }, ...model.observations.map((observation) => h("article", { class: "print-card" }, h("div", { class: "print-card-identity" }, h("div", { class: "print-card-head" }, h("h3", { class: "print-card-name" }, observation.name), h("span", { class: "print-card-isin" }, observation.isin)), h("dl", { class: "print-facts print-dates" }, ...observation.dates.flatMap((fact) => [h("dt", null, `${fact.label} :`), h("dd", null, fact.value)])), h("p", { class: "print-card-kind" }, observation.facts.map((fact) => fact.value).join(" · "))), h("div", { class: "print-card-levels" }, h("p", { class: "print-card-reference" }, observation.reference), observation.gauge === null ? null : gauge(observation.gauge), h("dl", { class: "print-barriers" }, ...observation.barriers.map((barrier) => h("div", { class: "print-barrier" }, h("dt", null, barrier.label), h("dd", null, [
 		barrier.level,
 		barrier.distance,
 		barrier.note
-	].filter((part) => part !== null).join(" · "))]))))));
+	].filter((part) => part !== null).join(" · ")))))), h("div", { class: "print-card-figures" }, h("div", {
+		class: "print-figure",
+		attrs: { "data-figure": "nominal" }
+	}, h("span", { class: "print-figure-label" }, observation.figures.nominalLabel), h("span", { class: "print-figure-value" }, observation.figures.nominal)), h("div", {
+		class: "print-figure",
+		attrs: { "data-figure": "coupon" }
+	}, h("span", { class: "print-figure-label" }, observation.figures.couponLabel), h("span", { class: "print-figure-value" }, observation.figures.coupon), ...observation.figures.couponLines.map((line) => h("span", { class: "print-figure-line" }, line))))))));
 }
 function printRoot(model) {
 	return h("div", { class: "print-root" }, cover(model), indicators(model), inventory(model), observations(model));
@@ -36709,7 +36744,7 @@ function mountDashboard(host, store) {
 		}, ...basesBanner(summary).map((item) => h("div", { class: "bases-item" }, h("p", { class: "indicator-label" }, item.label), h("p", { class: "bases-value" }, item.value), item.line === null ? null : h("p", { class: "indicator-subline" }, item.line)))), h("section", {
 			class: "section",
 			attrs: { "aria-label": "Prochaines constatations" }
-		}, h("div", { class: "section-head" }, h("h2", { class: "section-title" }, "Prochaines constatations"), h("span", { class: "section-note" }, upcomingNote(upcoming.length))), upcoming.length === 0 ? h("p", { class: "page-help" }, NO_UPCOMING_LABEL) : eventGrid(upcoming.map((entry) => eventCardModel(entry, scale, today(), "dashboard")), state, false)), summaryRow$1(dashboardSummaryModel(dataset.accounts.length, asOfDate, indicators), dashboardIndicatorModels(indicators)), breakdownSection(dashboardBreakdowns(holdings, base, underlyingsOf(computed)), base, (next) => {
+		}, h("div", { class: "section-head" }, h("h2", { class: "section-title" }, "Prochaines constatations"), h("span", { class: "section-note" }, upcomingNote(upcoming.length))), upcoming.length === 0 ? h("p", { class: "page-help" }, NO_UPCOMING_LABEL) : eventList(upcoming.map((entry) => eventCardModel(entry, scale, today(), "dashboard")), state, false)), summaryRow$1(dashboardSummaryModel(dataset.accounts.length, asOfDate, indicators), dashboardIndicatorModels(indicators)), breakdownSection(dashboardBreakdowns(holdings, base, underlyingsOf(computed)), base, (next) => {
 			base = next;
 			render();
 		}, {
@@ -36769,10 +36804,6 @@ var HOLDERS_EXPORT_COLUMNS = [
 		cell: (row) => row.currency
 	},
 	{
-		header: "Nominal (EUR)",
-		cell: (row) => amount(row.nominalEur)
-	},
-	{
 		header: "Valorisation (EUR)",
 		cell: (row) => amount(row.marketValueEur)
 	},
@@ -36815,8 +36846,12 @@ var HOLDER_PRODUCTS_EXPORT_COLUMNS = [
 		cell: (row) => row.accountCount
 	},
 	{
-		header: "Nominal total (EUR)",
-		cell: (row) => amount(row.nominalEur)
+		header: "Nominal total",
+		cell: (row) => amount(row.nominal)
+	},
+	{
+		header: "Devise",
+		cell: (row) => row.currency
 	},
 	{
 		header: "Valorisation totale (EUR)",
@@ -36827,7 +36862,7 @@ var HOLDER_PRODUCTS_EXPORT_COLUMNS = [
 function holdersSheets(view, details, context) {
 	const { totals } = details;
 	const warnings = [CLIENT_NAMES_WARNING];
-	if (totals.withoutRate > 0) warnings.push(`${totals.withoutRate} position(s) sans taux de change : leur nominal en euros est absent, et non compté pour 0.`);
+	if (totals.withoutRate > 0) warnings.push(`${totals.withoutRate} position(s) sans taux de change : elles sont hors du nominal total en euros, et non comptées pour 0.`);
 	if (totals.withoutNominal > 0) warnings.push(`${totals.withoutNominal} position(s) sans nominal : absentes du nominal total.`);
 	if (totals.withoutMarketValue > 0) warnings.push(`${totals.withoutMarketValue} position(s) sans valorisation : absentes de la valorisation totale.`);
 	const extra = [
@@ -36948,9 +36983,10 @@ function holdersByProduct(rows, products) {
 			observationType: product === void 0 ? null : observationType(product),
 			accountCount: new Set(group.map((row) => row.accountId)).size,
 			positionCount: group.length,
-			nominalEur: sumKnown(group.map((row) => row.nominalEur)),
+			nominal: sumKnown(group.map((row) => row.nominal)),
+			currency: product?.currency ?? group[0]?.currency ?? null,
 			marketValueEur: sumKnown(group.map((row) => row.marketValueEur)),
-			withoutNominalEur: group.filter((row) => row.nominalEur === null).length,
+			withoutNominal: group.filter((row) => row.nominal === null).length,
 			withoutMarketValue: group.filter((row) => row.marketValueEur === null).length
 		};
 	});
@@ -37220,13 +37256,6 @@ var HOLDER_COLUMNS = [
 		cell: (row) => cell(row.nominal === null ? "N/A" : formatAmount(row.nominal, row.currency), true)
 	},
 	{
-		id: "nominalEur",
-		label: "Nominal en EUR",
-		numeric: true,
-		sortValue: (row) => row.nominalEur,
-		cell: (row) => cell(euros$1(row.nominalEur))
-	},
-	{
 		id: "marketValueEur",
 		label: "Valorisation en EUR",
 		numeric: true,
@@ -37290,11 +37319,11 @@ var productColumns = (marked) => [
 		cell: (row) => cell(formatCount(row.accountCount))
 	},
 	{
-		id: "nominalEur",
+		id: "nominal",
 		label: "Nominal total",
 		numeric: true,
-		sortValue: (row) => row.nominalEur,
-		cell: (row) => cell(euros$1(row.nominalEur), true, row.withoutNominalEur === 0 ? null : `hors ${formatCount(row.withoutNominalEur)}`)
+		sortValue: (row) => row.nominal,
+		cell: (row) => cell(row.nominal === null ? "N/A" : formatAmount(row.nominal, row.currency), true, row.withoutNominal === 0 ? null : `hors ${formatCount(row.withoutNominal)}`)
 	},
 	{
 		id: "marketValueEur",
@@ -37874,9 +37903,7 @@ var SUMMARY_HEADER = [
 	"Statut à l'horizon",
 	"Date du statut",
 	"Motif",
-	"Nature du compte",
-	"Total des coupons (EUR)",
-	"Nominal remboursé (EUR)"
+	"Nature du compte"
 ];
 var CALENDAR_HEADER = [
 	"Compte",
@@ -37895,9 +37922,7 @@ var CALENDAR_HEADER = [
 	"Coupon dû (%)",
 	"Niveau simulé (%)",
 	"Barrière de rappel (%)",
-	"Barrière de rappel — mention",
-	"Coupon (EUR)",
-	"Nominal remboursé (EUR)"
+	"Barrière de rappel — mention"
 ];
 var SUBTOTALS_TITLE = "Sous-totaux par produit";
 var SUBTOTALS_HEADER = [
@@ -37911,9 +37936,7 @@ var SUBTOTALS_HEADER = [
 	"Total des coupons",
 	"Nominal remboursé",
 	"Statut à l'horizon",
-	"Date du statut",
-	"Total des coupons (EUR)",
-	"Nominal remboursé (EUR)"
+	"Date du statut"
 ];
 var yesNo = (value) => value === null ? null : value ? "Oui" : "Non";
 var statusLabel = (status) => status === "notSimulated" ? NOT_SIMULATED_LABEL : HORIZON_STATUS_LABELS[status];
@@ -37929,9 +37952,7 @@ function subtotalRow(subtotal) {
 		amount(subtotal.totalCoupons),
 		amount(subtotal.capitalRepaid),
 		statusLabel(subtotal.status),
-		date(subtotal.statusDate),
-		amount(subtotal.totalCouponsEur),
-		amount(subtotal.capitalRepaidEur)
+		date(subtotal.statusDate)
 	];
 }
 function summaryRow(row) {
@@ -37949,16 +37970,14 @@ function summaryRow(row) {
 		statusLabel(row.status),
 		date(row.statusDate),
 		row.reason === null ? null : notSimulatedReasonLabel(row.reason, row.familyReason),
-		NATURE_LABELS[row.nature],
-		amount(row.totalCouponsEur),
-		amount(row.capitalRepaidEur)
+		NATURE_LABELS[row.nature]
 	];
 }
 function calendarRows(simulation) {
 	const rows = [];
 	for (const { holding, simulation: product, events } of simulation.positions) {
 		if (!product.simulated) continue;
-		for (const { event, coupon, capital, total, couponEur, capitalEur } of events) rows.push([
+		for (const { event, coupon, capital, total } of events) rows.push([
 			holding.position.accountId,
 			holding.position.holder,
 			holding.product.name,
@@ -37975,9 +37994,7 @@ function calendarRows(simulation) {
 			decimal(event.couponDuePct),
 			decimal(product.level),
 			decimal(product.callBarrier?.level ?? null),
-			product.callBarrier?.provisional == null ? null : PROVISIONAL_BARRIER_LABELS[product.callBarrier.provisional],
-			amount(couponEur),
-			amount(capitalEur)
+			product.callBarrier?.provisional == null ? null : PROVISIONAL_BARRIER_LABELS[product.callBarrier.provisional]
 		]);
 	}
 	return rows;
@@ -37996,6 +38013,7 @@ function simulationSheets(simulation, context) {
 	const warnings = [];
 	for (const flow of simulation.withoutRate) warnings.push(`${flow.positions} position(s) en ${flow.currency ?? "devise inconnue"} sans taux de change : leurs flux sont dans leur devise et hors des totaux en euros.`);
 	if (hypotheses.capitalNotSimulated.length > 0) warnings.push(`${hypotheses.capitalNotSimulated.length} produit(s) arrivent à échéance sans que leur capital soit simulé : il est absent du nominal remboursé, et non compté pour 0.`);
+	if (hypotheses.airbagLevelUnknown.length > 0) warnings.push(`${hypotheses.airbagLevelUnknown.length} Autocall Airbag sont simulés jusqu'à leur échéance alors que leur niveau Airbag n'est pas encore dans la base produits : leur barrière coupon actuelle est appliquée, leurs coupons peuvent être sous-estimés.`);
 	const calendar = calendarRows(simulation);
 	const extra = [
 		[
@@ -38193,6 +38211,7 @@ function simulatePortfolio(holdings, parameters) {
 		assumedCallDate: [],
 		issuerCallNotSimulated: [],
 		capitalNotSimulated: [],
+		airbagLevelUnknown: [],
 		notSimulated: []
 	};
 	const productOf = new Map(positions.map(({ holding }) => [holding.product.isin, holding.product]));
@@ -38215,6 +38234,7 @@ function simulatePortfolio(holdings, parameters) {
 		if (simulation.callDateAssumed) hypotheses.assumedCallDate.push(isin);
 		if (product.issuerCallable) hypotheses.issuerCallNotSimulated.push(isin);
 		if (simulation.status === "expiredNotSimulated") hypotheses.capitalNotSimulated.push(isin);
+		if (simulation.airbagLevelUnknown) hypotheses.airbagLevelUnknown.push(isin);
 	}
 	return {
 		parameters,
@@ -39789,6 +39809,7 @@ if (root !== null) mountApp(root, { pages: {
   --issue-coupon-not-paid-zone: rgba(242, 179, 61, 0.34);
   --issue-no-event-zone: rgba(141, 138, 153, 0.24);
   --issue-maturity-redeemed-zone: rgba(76, 143, 230, 0.4);
+  --issue-maturity-redeemed-soft-zone: rgba(76, 143, 230, 0.16);
   --issue-maturity-loss-zone: rgba(229, 72, 77, 0.4);
   --loss-ink: #f59497;
 
@@ -39830,6 +39851,7 @@ if (root !== null) mountApp(root, { pages: {
   --issue-coupon-not-paid-zone: rgba(217, 154, 18, 0.32);
   --issue-no-event-zone: rgba(138, 135, 150, 0.2);
   --issue-maturity-redeemed-zone: rgba(42, 111, 201, 0.3);
+  --issue-maturity-redeemed-soft-zone: rgba(42, 111, 201, 0.12);
   --issue-maturity-loss-zone: rgba(200, 38, 44, 0.28);
   --loss-ink: #a11d22;
 
@@ -40334,6 +40356,11 @@ a {
   background: var(--issue-maturity-redeemed-zone);
 }
 
+/* Capital remboursé sans le coupon final : la même teinte, plus légère (design.md §6.5). */
+.gauge-zone[data-outcome='maturityRedeemed'].is-soft {
+  background: var(--issue-maturity-redeemed-soft-zone);
+}
+
 .gauge-zone[data-outcome='maturityLoss'] {
   background: var(--issue-maturity-loss-zone);
 }
@@ -40394,28 +40421,10 @@ a {
 }
 
 /* ── Carte d'événement (§6.3) et bandeau d'issue (§6.4) ── */
-.event-grid {
-  --event-card-height: calc(300px * var(--text-scale));
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  /* Une rangée prend la hauteur de sa carte la plus haute, même quand la liste défile :
-     sans cela, une liste à hauteur limitée ramène chaque rangée à la hauteur minimale. */
-  grid-auto-rows: max-content;
-  gap: var(--gap-tiles);
-}
-
-/* Au-delà de cinq rangées, la liste défile dans la page. */
-.event-grid.is-scrolling {
-  max-height: calc(5 * var(--event-card-height) + 4 * var(--gap-tiles) + 4px);
-  overflow-y: auto;
-  padding: 2px 8px 2px 2px;
-}
-
 .event-card {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  min-height: var(--event-card-height);
   overflow: hidden;
 }
 
@@ -40601,15 +40610,9 @@ a {
   font-style: italic;
 }
 
-@media (max-width: 1100px) {
-  .event-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
 /*
- * Analyse PS : une carte par ligne, sur toute la largeur. Sous le bandeau d'issue, trois
- * colonnes : identité du produit, jauge, chiffres.
+ * Analyse PS et Dashboard : une carte par ligne, sur toute la largeur. Sous le bandeau
+ * d'issue, trois colonnes : identité du produit, jauge, barrières (et chiffres de l'Analyse PS).
  */
 .event-list {
   display: flex;
@@ -42949,27 +42952,37 @@ a {
     overflow: visible;
   }
 
-  /* ── Prochaines constatations : deux cartes par ligne, jamais coupées, jauge en couleur ── */
-  /* Espacements d'un demi-millimètre plus serrés qu'ailleurs : trois rangées tiennent sur la page même quand un nom long, à côté de son ISIN, prend deux lignes. */
+  /* ── Prochaines constatations : une carte par ligne, jamais coupée, jauge en couleur ── */
   .print-observations {
     gap: 8px;
   }
 
   .print-cards {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 8px;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
   }
 
+  /* Trois colonnes : le produit et ses dates, sa jauge et ses barrières, ses chiffres. */
   .print-card {
-    display: flex;
-    flex-direction: column;
-    gap: 5px;
-    padding: 9px 12px;
+    display: grid;
+    grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.6fr) minmax(0, 0.65fr);
+    align-items: start;
+    gap: 3px 7mm;
+    padding: 7px 12px;
     border: 1px solid var(--tile-line);
     border-radius: 8px;
     line-height: 1.4;
     break-inside: avoid;
+  }
+
+  .print-card-identity,
+  .print-card-levels,
+  .print-card-figures {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
   }
 
   /* Le nom du produit, et son code ISIN à droite sur la même ligne. */
@@ -42994,7 +43007,8 @@ a {
     white-space: nowrap;
   }
 
-  .print-card-reference {
+  .print-card-reference,
+  .print-card-kind {
     color: var(--ink-2);
   }
 
@@ -43013,9 +43027,67 @@ a {
     margin: 0;
   }
 
-  /* Deux faits par ligne : libellé, valeur, libellé, valeur. */
-  .print-facts-pairs {
-    grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr);
+  /* Bloc de dates : trois lignes « libellé : date », les dates alignées et jamais coupées. */
+  .print-dates dd {
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  /* Les barrières côte à côte sous la jauge : un groupe « libellé valeur » par barrière, jamais coupé. */
+  .print-barriers {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1px 5mm;
+    margin: 0;
+  }
+
+  .print-barrier {
+    display: flex;
+    gap: 5px;
+    white-space: nowrap;
+  }
+
+  .print-barrier dt {
+    color: var(--ink-3);
+  }
+
+  .print-barrier dd {
+    margin: 0;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Nominal souscrit et prochain coupon : deux blocs, dans la devise du produit. */
+  .print-card-figures {
+    gap: 4px;
+  }
+
+  .print-figure {
+    display: flex;
+    flex-direction: column;
+    padding: 3px 8px;
+    border-radius: 6px;
+    background: var(--chip);
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+
+  .print-figure-label {
+    color: var(--ink-3);
+    font-size: 6.5pt;
+  }
+
+  .print-figure-value {
+    font-size: 9pt;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .print-figure-line {
+    color: var(--ink-2);
+    font-size: 6.5pt;
+    font-variant-numeric: tabular-nums;
   }
 
   /* Zones de la jauge : les couleurs de l'outil, imprimées même sans « Graphiques d'arrière-plan ». */
